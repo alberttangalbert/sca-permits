@@ -1,16 +1,24 @@
-"""Step 0 fetch engine — paged JSON search against EnerGov CSS.
+"""Step 0 fetch engine — date-chunked JSON search against EnerGov CSS.
 
-Replaces cu-permits' Accela requests-postback + ViewState machinery with a plain
-paged JSON POST. There is no Cloudflare gate (IIS host), so the only resilience
-needed is HTTP 429/5xx backoff + a consecutive-error abort budget.
+EnerGov's search is backed by Elasticsearch with index.max_result_window = 10000,
+so offset paging dies at from+size > 10000 (page 101 @ size 100). The SPA's
+default global search (SearchModule=1) also IGNORES filters, so it can't be
+narrowed. The fix (the cu-permits year-chunking doctrine, ported to JSON):
 
-Each page's raw response JSON is cached to outputs/raw/sca/<module>/page_NNNNN.json
-so step 1 re-parses are free and there's an audit trail (same discipline as the
-Accela cities caching result-grid HTML).
+  * use SearchModule=2 (Permit-specific search), which honors PermitCriteria
+    filters including ApplyDateFrom/To;
+  * chunk by ApplyDate year (San Carlos: 1999..present, ~2k permits/year — well
+    under 10k); recursively halve any window that still exceeds the cap;
+  * page through each window and cache its pages;
+  * step 1 dedups on the CaseId GUID, so overlapping windows are free.
+
+No Cloudflare gate (IIS host) — the only resilience is HTTP 429/5xx backoff.
 """
 
 from __future__ import annotations
 
+import datetime as dt
+import math
 import time
 from pathlib import Path
 
@@ -25,12 +33,11 @@ class SearchError(RuntimeError):
     """Non-retryable search failure (bad body, persistent 5xx, etc.)."""
 
 
-# 429/503 are transient (rate-limit / unavailable); back off and retry.
-RETRY_STATUS = {429, 503}
+RETRY_STATUS = {429, 503}        # transient — back off and retry
 MAX_RETRIES = 4
-BACKOFF_BASE = 1.0          # seconds: 1, 2, 4, 8
-# A run aborts if this many pages fail in a row (defensive, mirrors cu-permits).
-MAX_CONSECUTIVE_ERRORS = 5
+BACKOFF_BASE = 1.0               # seconds: 1, 2, 4, 8
+RESULT_WINDOW_CAP = 10000        # Elasticsearch index.max_result_window
+SEARCH_MODULE_MODULE_SPECIFIC = 2  # honors PermitCriteria filters + paging
 
 
 def make_session() -> requests.Session:
@@ -39,110 +46,133 @@ def make_session() -> requests.Session:
     return s
 
 
-def search_page(session: requests.Session, filter_module: int,
-                page_number: int, page_size: int,
-                sort_by: str, sort_ascending: bool) -> dict:
-    """POST one search page; return the parsed `Result` envelope.
-
-    Retries 429/503 with exponential backoff. Raises SearchError on a
-    non-retryable failure or after exhausting retries.
-    """
-    body = build_search_body(filter_module, page_number, page_size,
-                             sort_by=sort_by, sort_ascending=sort_ascending)
-    last_exc: Exception | None = None
+def _request(session: requests.Session, body: dict, what: str) -> dict:
+    """POST a search body; return the `Result` envelope. Retries 429/503."""
+    last: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
         try:
             r = session.post(SEARCH_URL, json=body, timeout=60)
         except requests.RequestException as exc:
-            last_exc = exc
+            last = exc
         else:
             if r.status_code == 200:
                 payload = r.json()
                 if not payload.get("Success", True):
-                    raise SearchError(
-                        f"page {page_number}: Success=false "
-                        f"err={payload.get('ErrorMessage')!r}")
+                    raise SearchError(f"{what}: Success=false "
+                                      f"err={str(payload.get('ErrorMessage'))[:200]!r}")
                 result = payload.get("Result")
                 if result is None:
-                    raise SearchError(f"page {page_number}: no Result envelope")
+                    raise SearchError(f"{what}: no Result envelope")
                 return result
             if r.status_code not in RETRY_STATUS:
-                raise SearchError(
-                    f"page {page_number}: HTTP {r.status_code} "
-                    f"body={r.text[:200]!r}")
-            last_exc = SearchError(f"HTTP {r.status_code}")
+                raise SearchError(f"{what}: HTTP {r.status_code} body={r.text[:200]!r}")
+            last = SearchError(f"HTTP {r.status_code}")
         if attempt < MAX_RETRIES:
-            backoff = BACKOFF_BASE * (2 ** attempt)
-            time.sleep(backoff)
-    raise SearchError(f"page {page_number}: exhausted retries ({last_exc})")
+            time.sleep(BACKOFF_BASE * (2 ** attempt))
+    raise SearchError(f"{what}: exhausted retries ({last})")
 
 
-def page_path(raw_dir: Path, page_number: int) -> Path:
-    return raw_dir / f"page_{page_number:05d}.json"
+def _iso_from(d: dt.date) -> str:
+    return f"{d.isoformat()}T00:00:00"
+
+
+def _iso_to(d: dt.date) -> str:
+    return f"{d.isoformat()}T23:59:59"
+
+
+def _label(d0: dt.date, d1: dt.date) -> str:
+    if d0.month == 1 and d0.day == 1 and d1.month == 12 and d1.day == 31 \
+            and d0.year == d1.year:
+        return str(d0.year)
+    return f"{d0:%Y%m%d}-{d1:%Y%m%d}"
+
+
+def count_window(session: requests.Session, filter_module: int, sort_by: str,
+                 date_from: str | None, date_to: str | None) -> int:
+    body = build_search_body(filter_module, 1, 1, sort_by=sort_by,
+                             search_module=SEARCH_MODULE_MODULE_SPECIFIC,
+                             apply_date_from=date_from, apply_date_to=date_to)
+    return int(_request(session, body, "count").get("TotalFound") or 0)
+
+
+def _fetch_window(session, filter_module, sort_by, d0, d1, raw_dir, page_size,
+                  page_delay, no_cache, audit, log) -> None:
+    """Fetch one date window [d0, d1], recursively splitting if it exceeds the
+    10k cap. Caches pages under raw_dir/<label>/page_NNN.json."""
+    date_from, date_to = _iso_from(d0), _iso_to(d1)
+    label = _label(d0, d1)
+    count = count_window(session, filter_module, sort_by, date_from, date_to)
+    if count == 0:
+        return
+    if count >= RESULT_WINDOW_CAP:
+        if (d1 - d0).days <= 0:
+            # Single day still over the cap — fetch what we can (the cap clips it)
+            # and record it so it's visible in the audit.
+            log(f"  [{label}] WARNING: {count} >= cap on a single day; "
+                f"capped at {RESULT_WINDOW_CAP}")
+        else:
+            mid = d0 + (d1 - d0) // 2
+            log(f"  [{label}] {count} >= {RESULT_WINDOW_CAP} — splitting at {mid}")
+            _fetch_window(session, filter_module, sort_by, d0, mid, raw_dir,
+                          page_size, page_delay, no_cache, audit, log)
+            _fetch_window(session, filter_module, sort_by, mid + dt.timedelta(days=1),
+                          d1, raw_dir, page_size, page_delay, no_cache, audit, log)
+            return
+
+    pages = math.ceil(count / page_size)
+    audit["windows"].append({"label": label, "count": count, "pages": pages})
+    audit["sum_window_counts"] += count
+    win_dir = raw_dir / label
+    win_dir.mkdir(parents=True, exist_ok=True)
+    for p in range(1, pages + 1):
+        dest = win_dir / f"page_{p:03d}.json"
+        if dest.exists() and not no_cache:
+            audit["pages_skipped"] += 1
+            continue
+        body = build_search_body(filter_module, p, page_size, sort_by=sort_by,
+                                 search_module=SEARCH_MODULE_MODULE_SPECIFIC,
+                                 apply_date_from=date_from, apply_date_to=date_to)
+        result = _request(session, body, f"{label} p{p}")
+        atomic_write_json(dest, result)
+        audit["pages_fetched"] += 1
+        audit["records_seen"] += len(result.get("EntityResults") or [])
+        if p < pages:
+            time.sleep(page_delay)
+    log(f"  [{label}] {count} records over {pages} page(s)")
 
 
 def fetch_all(module_label: str, filter_module: int, sort_by: str,
-              raw_dir: Path, page_size: int = DEFAULT_PAGE_SIZE,
-              max_pages: int | None = None, page_delay: float = 1.0,
-              no_cache: bool = False, sort_ascending: bool = True,
-              log=print) -> dict:
-    """Page through the entire result set, caching each page's JSON.
-
-    Returns an audit dict: total_found, total_pages, pages_fetched,
-    pages_skipped (already cached), records_seen, duration_seconds, errors.
-    """
+              raw_dir: Path, start_year: int, end_year: int,
+              page_size: int = DEFAULT_PAGE_SIZE, page_delay: float = 1.0,
+              no_cache: bool = False, log=print) -> dict:
+    """Year-chunk the full result set across [start_year, end_year] and cache
+    each window's pages. Returns an audit dict including a reconciliation of the
+    summed per-window counts against the global TotalFound."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     session = make_session()
     started = time.monotonic()
     audit = {
-        "module": module_label, "filter_module": filter_module,
-        "page_size": page_size, "total_found": None, "total_pages": None,
-        "pages_fetched": 0, "pages_skipped": 0, "records_seen": 0,
-        "errors": [],
+        "module": module_label, "page_size": page_size,
+        "start_year": start_year, "end_year": end_year,
+        "global_total": None, "sum_window_counts": 0,
+        "windows": [], "pages_fetched": 0, "pages_skipped": 0,
+        "records_seen": 0, "errors": [],
     }
-    consecutive_errors = 0
     try:
-        # Page 1 first to learn TotalPages.
-        first = search_page(session, filter_module, 1, page_size,
-                            sort_by, sort_ascending)
-        total_pages = int(first.get("TotalPages") or 0)
-        total_found = int(first.get("TotalFound") or 0)
-        audit["total_found"] = total_found
-        audit["total_pages"] = total_pages
-        last_page = total_pages if max_pages is None else min(total_pages, max_pages)
-        log(f"  TotalFound={total_found} TotalPages={total_pages} "
-            f"-> fetching {last_page} page(s) @ size {page_size}")
-
-        for page in range(1, last_page + 1):
-            dest = page_path(raw_dir, page)
-            if page == 1:
-                result = first
-            elif dest.exists() and not no_cache:
-                audit["pages_skipped"] += 1
-                continue
-            else:
-                try:
-                    result = search_page(session, filter_module, page, page_size,
-                                        sort_by, sort_ascending)
-                    consecutive_errors = 0
-                except SearchError as exc:
-                    consecutive_errors += 1
-                    audit["errors"].append({"page": page, "error": str(exc)})
-                    log(f"  [page {page}] ERROR: {exc}")
-                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        log(f"  aborting: {consecutive_errors} consecutive errors")
-                        break
-                    time.sleep(page_delay)
-                    continue
-
-            atomic_write_json(dest, result)
-            audit["pages_fetched"] += 1
-            audit["records_seen"] += len(result.get("EntityResults") or [])
-            if page % 25 == 0 or page == last_page:
-                log(f"  page {page}/{last_page}  (records_seen={audit['records_seen']})")
-            if page < last_page:
-                time.sleep(page_delay)
+        audit["global_total"] = count_window(session, filter_module, sort_by,
+                                             None, None)
+        log(f"  global TotalFound={audit['global_total']}; "
+            f"chunking ApplyDate years {start_year}..{end_year}")
+        for year in range(start_year, end_year + 1):
+            try:
+                _fetch_window(session, filter_module, sort_by,
+                              dt.date(year, 1, 1), dt.date(year, 12, 31),
+                              raw_dir, page_size, page_delay, no_cache, audit, log)
+            except SearchError as exc:
+                audit["errors"].append({"year": year, "error": str(exc)})
+                log(f"  [{year}] ERROR: {exc}")
     finally:
         session.close()
     audit["duration_seconds"] = round(time.monotonic() - started, 1)
+    audit["reconciled"] = (audit["sum_window_counts"] == audit["global_total"])
     return audit

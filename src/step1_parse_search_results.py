@@ -28,7 +28,7 @@ from utils.io import ROOT, atomic_write_json, connect, load_json
 from utils.step_1.parsing import COLUMNS, parse_page
 
 OUTPUTS_DIR = ROOT / "outputs" / "step_1"
-_PAGE_NUM = re.compile(r"page_(\d+)\.json$")
+_PAGE_NUM = re.compile(r"(\d+)\.json$")
 
 
 def raw_dir_for(module: str) -> Path:
@@ -59,7 +59,8 @@ def main(module: str, dry_run: bool) -> int:
     started = dt.datetime.now().astimezone().replace(microsecond=0)
     run_id = started.strftime("%Y-%m-%d_%H%M%S")
     raw_dir = raw_dir_for(module)
-    pages = sorted(raw_dir.glob("page_*.json"))
+    # Cache is laid out per window: outputs/raw/sca/<module>/<window>/page_NNN.json
+    pages = sorted(raw_dir.glob("**/page_*.json"))
     now_iso = started.isoformat()
 
     print(f"[{run_id}] module:   {module}")

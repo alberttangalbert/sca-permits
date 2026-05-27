@@ -148,22 +148,43 @@ _PLAN_CRITERIA = {
 def build_search_body(filter_module: int, page_number: int,
                       page_size: int = DEFAULT_PAGE_SIZE,
                       sort_by: str = "PermitNumber.keyword",
-                      sort_ascending: bool = True) -> dict:
+                      sort_ascending: bool = True,
+                      search_module: int = 1,
+                      apply_date_from: str | None = None,
+                      apply_date_to: str | None = None) -> dict:
     """Build the search POST body for a given module + page.
 
-    Mirrors the SPA's envelope: SearchModule=1 (All) + FilterModule scopes the
-    result set; top-level PageNumber/PageSize drive paging. All per-module
-    criteria objects are sent (null/sentinel) for parity with the SPA — ASP.NET
-    model binding tolerates the ones we don't populate.
+    Two modes, both observed against the live API:
+
+    * search_module=1 (All / global keyword search): the SPA's default. The
+      server reads TOP-LEVEL PageNumber/PageSize and IGNORES the per-module
+      criteria (so date/type filters do nothing). Offset paging is capped at
+      10,000 results (Elasticsearch index.max_result_window).
+
+    * search_module=2 (Permit-specific / "Advanced" search): the server reads
+      paging AND filters from PermitCriteria. This is the mode that honors
+      ApplyDateFrom/To — used to year-chunk the backfill under the 10k cap.
+
+    All per-module criteria objects are sent (null/sentinel) for parity with the
+    SPA; ASP.NET model binding tolerates the ones we don't populate.
     """
+    permit = copy.deepcopy(_PERMIT_CRITERIA)
+    permit["ApplyDateFrom"] = apply_date_from
+    permit["ApplyDateTo"] = apply_date_to
+    if search_module != FILTER_MODULE["All"]:
+        # Module-specific search reads paging from the criteria object.
+        permit["PageNumber"] = page_number
+        permit["PageSize"] = page_size
+        permit["SortBy"] = sort_by
+        permit["SortAscending"] = sort_ascending
     return {
         "Keyword": "",
         "ExactMatch": True,
-        "SearchModule": FILTER_MODULE["All"],   # 1
+        "SearchModule": search_module,
         "FilterModule": filter_module,
         "SearchMainAddress": False,
         "PlanCriteria": copy.deepcopy(_PLAN_CRITERIA),
-        "PermitCriteria": copy.deepcopy(_PERMIT_CRITERIA),
+        "PermitCriteria": permit,
         "InspectionCriteria": _null_criteria({
             "InspectionNumber": None, "InspectionTypeId": None,
             "InspectionStatusId": None}),
