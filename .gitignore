@@ -1,0 +1,39 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Atomic-write temp files
+*.tmp
+
+# Environment / secrets
+.env
+
+# Generated outputs — regenerable (cached search JSON + SQLite live here)
+outputs/
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Cron / debug logs
+logs/
+
+# Backups
+backups/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Claude harness
+.claude/
+
+# Wrangler / Cloudflare CLI
+.wrangler/

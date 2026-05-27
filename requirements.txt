@@ -1,0 +1,3 @@
+requests>=2.31
+# No BeautifulSoup/Selenium: San Carlos is a JSON REST API (Tyler EnerGov CSS),
+# scraped with plain requests + json. See docs/handoff/scraping-strategy.md.
