@@ -151,6 +151,7 @@ python3 src/tick.py --dry-run        # print the plan, touch nothing
 python3 src/tick.py                  # refresh last 2 years (SQL-only sync)
 python3 src/tick.py --execute-sync   # ...and push to D1 (needs CF_* env)
 scripts/tick.sh                      # same, but venv-activate + tee to logs/
+python3 src/healthcheck.py           # read-only integrity check (tick runs this last)
 ```
 
 Schedule it from cron, **staggered** off the sibling cities (Fremont 4:30 /
@@ -188,6 +189,7 @@ src/
   step3b_cluster.py               sca_leads -> sca_lead_clusters (entrypoint)
   step4_sync_d1.py                sca_leads -> Cloudflare D1 SQL/push (entrypoint)
   tick.py                         incremental daily refresh orchestrator (entrypoint)
+  healthcheck.py                  read-only DB integrity + consistency checks (entrypoint)
   utils/
     config.py    API URLs, headers, FilterModule enum, search-body builder
     auth.py      anonymous headers (+ optional SCA_BEARER_TOKEN fallback)

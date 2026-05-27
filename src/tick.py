@@ -150,6 +150,7 @@ def main(args) -> int:
         print(f"  6. step3 score --rebuild")
         print(f"  6b. step3b cluster leads -> projects")
         print(f"  7. step4 sync leads + clusters {sync_desc}")
+        print(f"  8. healthcheck verify DB integrity")
         return 0
 
     # Throttle: don't re-scrape the live portal more often than min-interval-hours.
@@ -233,6 +234,10 @@ def _run_pipeline(args, start_year, end_year, years, since) -> int:
                 sync_args.append("--execute")
             run_step(f"step4: sync {label} to D1", sync_args,
                      critical=False, results=results)
+
+    # 8. Healthcheck — verify integrity before anyone reads the refreshed data.
+    run_step("healthcheck: verify DB integrity",
+             [str(SRC / "healthcheck.py"), "-q"], critical=False, results=results)
 
     return _summary(results, 0)
 
