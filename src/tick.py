@@ -82,6 +82,7 @@ def main(args) -> int:
         print(f"  4. step2 fetch --since {since}   (cache-skips existing -> new only)")
         print(f"  5. step2 parse")
         print(f"  6. step3 score --rebuild")
+        print(f"  6b. step3b cluster leads -> projects")
         print(f"  7. step4 sync {sync_desc}")
         return 0
 
@@ -128,6 +129,12 @@ def main(args) -> int:
         [str(SRC / "step3_score.py"), "--rebuild"],
         critical=True, results=results) != 0:
         return _summary(results, 2)
+
+    # 6b. Re-cluster scored leads into one-row-per-project (dedupe the call list).
+    run_step(
+        "step3b: cluster leads -> projects",
+        [str(SRC / "step3b_cluster.py"), "--module", MODULE],
+        critical=False, results=results)
 
     # 7. Regenerate D1 sync (push only when explicitly asked + creds present).
     if not args.skip_sync:

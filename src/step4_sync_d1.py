@@ -53,6 +53,7 @@ EXPORT_COLUMNS = [
     ("apply_date", "TEXT"), ("issue_date", "TEXT"), ("description", "TEXT"),
     ("owner_name", "TEXT"), ("owner_email", "TEXT"), ("owner_phone", "TEXT"),
     ("contractor_name", "TEXT"), ("scored_at", "TEXT"),
+    ("cluster_id", "TEXT"), ("cluster_key_type", "TEXT"),  # group permits into projects
 ]
 COLS = [c for c, _ in EXPORT_COLUMNS]
 
@@ -63,7 +64,7 @@ SELECT l.case_id, p.case_number, l.lead_score, l.lead_band, l.category,
        l.num_stories, l.construction_type, l.blocking_hold, l.has_contractor,
        p.address_display, p.main_parcel, p.apply_date, p.issue_date,
        p.description, l.owner_name, l.owner_email, l.owner_phone,
-       l.contractor_name, l.scored_at
+       l.contractor_name, l.scored_at, l.cluster_id, l.cluster_key_type
 FROM sca_leads l JOIN sca_permits p USING(case_id)
 """
 

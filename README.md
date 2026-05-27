@@ -23,9 +23,13 @@ This build covers **steps 0–4** for the **Permit** module:
   MEDIUM** — a ~5% funnel of new-SFR / ADU / addition projects that are
   approved-or-near but pre-contractor.
 
+- **Step 3b — clustering:** fold a parcel's permits into one project so the GC
+  doesn't call the same owner once per permit. Measured: 2,918 leads collapse to
+  ~2,116 projects. `sca_lead_clusters` is the deduped call list (one row per
+  project, anchored on the strongest permit).
 - **Step 4 — D1 sync:** publish the scored leads (denormalized with address +
-  contact context) to Cloudflare D1. Defaults to generating portable SQL
-  locally; the remote push is opt-in and uses your own credentials (the leads
+  contact + cluster context) to Cloudflare D1. Defaults to generating portable
+  SQL locally; the remote push is opt-in and uses your own credentials (the leads
   carry homeowner PII, so it never pushes without them).
 
 ## The API (verified 2026-05-26, read-only recon)
@@ -122,6 +126,10 @@ python3 src/step2_parse_details.py                           # cached detail -> 
 python3 src/step3_score.py --rebuild                         # score everything enriched
 python3 src/step3_score.py --dry-run                         # report band/category mix, no writes
 
+# Step 3b — cluster scored leads into one-row-per-project (the deduped call list).
+python3 src/step3b_cluster.py                                # build sca_lead_clusters
+python3 src/step3b_cluster.py --dry-run                      # report collapse stats, no writes
+
 # Step 4 — sync scored leads to Cloudflare D1 (generates SQL by default).
 python3 src/step4_sync_d1.py                                 # write d1_schema.sql + d1_sync.sql
 python3 src/step4_sync_d1.py --all                           # include DROP-band rows too
@@ -173,6 +181,7 @@ src/
   step2_fetch_details.py          per-record detail GETs      (entrypoint)
   step2_parse_details.py          detail JSON -> detail+contacts (entrypoint)
   step3_score.py                  enriched permits -> sca_leads  (entrypoint)
+  step3b_cluster.py               sca_leads -> sca_lead_clusters (entrypoint)
   step4_sync_d1.py                sca_leads -> Cloudflare D1 SQL/push (entrypoint)
   tick.py                         incremental daily refresh orchestrator (entrypoint)
   utils/
@@ -186,11 +195,13 @@ src/
     step_2/parsing.py   detail JSON -> detail row + contact rows (role normalize)
     step_3/scoring.py        gates×factors model (status buckets, size, banding)
     step_3/type_fit_rules.json  type -> score/category rule table (editable)
+    step_3/clustering.py     parcel/address cluster key + project aggregation
 scripts/tick.sh                         cron wrapper (venv + logging) around tick.py
 migrations/0001_init_sca_permits.sql    sca_permits table
 migrations/0002_add_permit_detail.sql   sca_permit_detail + sca_permit_contacts
 migrations/0003_add_lead_scores.sql     sca_leads
 migrations/0004_add_scope_and_holds.sql scope (sq ft/stories/construction) + active/blocking holds
+migrations/0005_add_lead_clusters.sql   cluster_id on sca_leads + sca_lead_clusters
 docs/handoff/                           design notes (platform, API, scoring)
 ```
 
