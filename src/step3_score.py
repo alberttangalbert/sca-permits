@@ -38,6 +38,7 @@ LEAD_COLUMNS = [
     "type_fit", "size_factor", "status_factor", "contractor_factor",
     "status_bucket", "valuation", "has_contractor",
     "owner_name", "owner_email", "owner_phone", "contractor_name",
+    "additional_sqft", "num_stories", "construction_type", "blocking_hold",
 ]
 
 
@@ -63,7 +64,8 @@ def _load_permits(conn, module, since, start_year, end_year, limit):
         where.append("p.apply_date <= ?"); params.append(f"{end_year}-12-31T23:59:59")
     if since:
         where.append("p.apply_date >= ?"); params.append(since)
-    sql = (f"SELECT p.case_id, p.case_type, p.case_status, p.description, d.valuation "
+    sql = (f"SELECT p.case_id, p.case_type, p.case_status, p.description, d.valuation, "
+           f"d.additional_sqft, d.num_stories, d.construction_type, d.blocking_hold_count "
            f"FROM sca_permit_detail d JOIN sca_permits p USING(case_id) "
            f"WHERE {' AND '.join(where)} ORDER BY p.apply_date DESC")
     if limit:
@@ -108,9 +110,14 @@ def main(args) -> int:
         contacts_by_case = _load_contacts(conn, case_ids)
 
         rows = []
-        for case_id, case_type, case_status, description, valuation in permits:
-            lead = score_record(case_type, case_status, description, valuation,
-                                contacts_by_case.get(case_id, []))
+        for (case_id, case_type, case_status, description, valuation,
+             additional_sqft, num_stories, construction_type, blocking_holds) in permits:
+            lead = score_record(
+                case_type, case_status, description, valuation,
+                contacts_by_case.get(case_id, []),
+                additional_sqft=additional_sqft, num_stories=num_stories,
+                construction_type=construction_type,
+                blocking_hold_count=blocking_holds)
             lead["case_id"] = case_id
             rows.append(lead)
 

@@ -154,15 +154,25 @@ def pick_contacts(contacts: list[dict]) -> dict:
     }
 
 
-def score_record(case_type, case_status, description, valuation, contacts) -> dict:
-    """Compute the full lead row (factors + band + best contacts) for one permit."""
+def score_record(case_type, case_status, description, valuation, contacts, *,
+                 additional_sqft=None, num_stories=None, construction_type=None,
+                 blocking_hold_count=0) -> dict:
+    """Compute the full lead row (factors + band + best contacts) for one permit.
+
+    A blocking hold (active, non-expired) means the project is stuck at the city,
+    so it's lightly de-prioritized (hold_factor 0.9) and flagged for the caller.
+    additional_sqft / num_stories / construction_type are carried as lead context
+    (they qualify the job on a sales call); they don't drive the score — every
+    record that has them also has a valuation, so size is already covered."""
     type_fit, category = classify_type(case_type, description)
     sf = size_factor(valuation)
     stf, bucket = status_factor(case_status)
     picked = pick_contacts(contacts)
     contractor_factor = 0.8 if picked["has_contractor"] else 1.0
+    blocking = 1 if (blocking_hold_count or 0) > 0 else 0
+    hold_factor = 0.9 if blocking else 1.0
 
-    score = round(100 * type_fit * sf * stf * contractor_factor, 1)
+    score = round(100 * type_fit * sf * stf * contractor_factor * hold_factor, 1)
     return {
         "lead_score": score,
         "lead_band": band(score),
@@ -173,5 +183,9 @@ def score_record(case_type, case_status, description, valuation, contacts) -> di
         "contractor_factor": contractor_factor,
         "status_bucket": bucket,
         "valuation": valuation,
+        "additional_sqft": additional_sqft,
+        "num_stories": num_stories,
+        "construction_type": construction_type,
+        "blocking_hold": blocking,
         **picked,
     }

@@ -153,6 +153,7 @@ src/
 migrations/0001_init_sca_permits.sql    sca_permits table
 migrations/0002_add_permit_detail.sql   sca_permit_detail + sca_permit_contacts
 migrations/0003_add_lead_scores.sql     sca_leads
+migrations/0004_add_scope_and_holds.sql scope (sq ft/stories/construction) + active/blocking holds
 docs/handoff/                           design notes (platform, API, scoring)
 ```
 

@@ -14,6 +14,9 @@ DETAIL_COLUMNS = [
     "case_id", "valuation", "square_feet", "main_parcel", "parcel_count",
     "contact_count", "hold_count", "attachment_count",
     "permit_type_id", "permit_workclass_id", "is_renewal", "application_date",
+    # added in migration 0004 — harvested from CustomFields[] / Holds[]
+    "additional_sqft", "num_stories", "construction_type", "occupancy_class",
+    "active_hold_count", "blocking_hold_count",
 ]
 
 CONTACT_COLUMNS = [
@@ -33,6 +36,21 @@ def _s(v):
 
 def _num(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _fnum(v):
+    """Coerce a CustomField value (number or numeric string) to float, else None.
+    Treats 0 / blank / 'None' as absent (these are EnerGov's unfilled defaults)."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) or None
+    if isinstance(v, str):
+        try:
+            return float(v.strip().replace(",", "")) or None
+        except ValueError:
+            return None
+    return None
 
 
 def _bint(v):
@@ -86,6 +104,30 @@ def _main_parcel(result: dict) -> str | None:
     return None
 
 
+def _custom_fields(result: dict) -> dict:
+    """Map CustomFields to {stripped_lower_label: Value}. EnerGov's labels carry
+    TRAILING SPACES ('Number of Stories ') — strip or every lookup silently misses
+    (a bug caught in the step 0-3 audit)."""
+    out = {}
+    for cf in (result.get("CustomFields") or []):
+        label = (cf.get("Label") or cf.get("FieldName") or "").strip().lower()
+        if label and cf.get("Value") not in (None, ""):
+            out[label] = cf.get("Value")
+    return out
+
+
+def _holds_summary(result: dict) -> tuple[int, int]:
+    """(active_count, blocking_count). Blocking = active and not an 'Expired
+    Permit Hold' (that type just mirrors Expired status, so it's not new signal)."""
+    active = blocking = 0
+    for h in (result.get("Holds") or []):
+        if h.get("Active"):
+            active += 1
+            if "expired permit" not in (h.get("HoldTypeSetupName") or "").lower():
+                blocking += 1
+    return active, blocking
+
+
 def parse_contacts(result: dict, case_id: str) -> list[dict]:
     rows = []
     for c in (result.get("Contacts") or []):
@@ -112,6 +154,8 @@ def parse_contacts(result: dict, case_id: str) -> list[dict]:
 
 
 def parse_detail(result: dict, case_id: str) -> dict:
+    cf = _custom_fields(result)
+    active_holds, blocking_holds = _holds_summary(result)
     return {
         "case_id": case_id,
         "valuation": _num(result.get("ValuationValue")),
@@ -125,4 +169,10 @@ def parse_detail(result: dict, case_id: str) -> dict:
         "permit_workclass_id": _s(result.get("PermitWorkClassID")),
         "is_renewal": _bint(result.get("IsRenewal")),
         "application_date": _s(result.get("ApplicationDate")),
+        "additional_sqft": _fnum(cf.get("additional square footage")),
+        "num_stories": _fnum(cf.get("number of stories")),
+        "construction_type": _s(cf.get("type of construction")) if isinstance(cf.get("type of construction"), str) else None,
+        "occupancy_class": _s(cf.get("occupancy class")) if isinstance(cf.get("occupancy class"), str) else None,
+        "active_hold_count": active_holds,
+        "blocking_hold_count": blocking_holds,
     }
