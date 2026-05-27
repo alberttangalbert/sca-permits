@@ -1,0 +1,55 @@
+{
+  "_doc": "Ordered type_fit rules for San Carlos EnerGov permit types. First rule whose `match` is a substring of the lowercased case_type wins. Authored from the real 2025-2026 type vocabulary (docs/handoff/record-types-and-scoring.md). Bullseye for the GC: new SFR / ADU / addition / substantial remodel that is approved-or-near but pre-contractor. Sub-trades, admin, and (for this residential GC) commercial score low. The `category` is a coarse tag for reporting; `type_fit` is the 0-1 score. Order matters: combined/specific rules precede generic ones, and the `commercial` rule precedes generic residential-feature rules so 'Building Commercial-Addition' isn't read as a residential addition.",
+  "fallback": { "type_fit": 0.3, "category": "OTHER" },
+  "rules": [
+    { "match": "new single family", "type_fit": 1.0, "category": "NEW_SFR" },
+    { "match": "sb9", "type_fit": 1.0, "category": "NEW_SFR" },
+    { "match": "reconstruction", "type_fit": 1.0, "category": "NEW_SFR" },
+    { "match": "second dwelling unit", "type_fit": 1.0, "category": "ADU" },
+    { "match": "jadu", "type_fit": 0.95, "category": "ADU" },
+    { "match": "adu", "type_fit": 1.0, "category": "ADU" },
+    { "match": "accessory dwelling", "type_fit": 1.0, "category": "ADU" },
+
+    { "match": "commercial", "type_fit": 0.2, "category": "COMMERCIAL" },
+
+    { "match": "addition", "type_fit": 0.9, "category": "ADDITION" },
+    { "match": "interior remodel", "type_fit": 0.75, "category": "REMODEL" },
+    { "match": "kitchen remodel", "type_fit": 0.6, "category": "REMODEL" },
+    { "match": "bathroom remodel", "type_fit": 0.4, "category": "REMODEL" },
+    { "match": "accessory structure", "type_fit": 0.7, "category": "OTHER" },
+    { "match": "demolition", "type_fit": 0.45, "category": "OTHER" },
+    { "match": "multi-residential", "type_fit": 0.5, "category": "COMMERCIAL" },
+
+    { "match": "retaining wall", "type_fit": 0.3, "category": "OTHER" },
+    { "match": "pool", "type_fit": 0.3, "category": "SUBTRADE" },
+    { "match": "deck", "type_fit": 0.3, "category": "SUBTRADE" },
+    { "match": "seismic", "type_fit": 0.2, "category": "SUBTRADE" },
+    { "match": "window replacement", "type_fit": 0.15, "category": "SUBTRADE" },
+
+    { "match": "reroof", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "roof", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "solar", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "battery", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "heat pump", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "fau", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "hvac", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "mechanical", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "water heater", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "sewer lateral", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "gas pipe", "type_fit": 0.05, "category": "SUBTRADE" },
+    { "match": "plumbing", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "charging station", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "generator", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "electrical", "type_fit": 0.1, "category": "SUBTRADE" },
+    { "match": "fire", "type_fit": 0.1, "category": "SUBTRADE" },
+
+    { "match": "signage", "type_fit": 0.02, "category": "OTHER" },
+    { "match": "billboard", "type_fit": 0.02, "category": "OTHER" },
+    { "match": "awning", "type_fit": 0.02, "category": "OTHER" },
+    { "match": "administrative", "type_fit": 0.02, "category": "OTHER" },
+    { "match": "operational", "type_fit": 0.02, "category": "OTHER" },
+    { "match": "fema", "type_fit": 0.02, "category": "OTHER" },
+
+    { "match": "miscellaneous", "type_fit": 0.25, "category": "OTHER" }
+  ]
+}

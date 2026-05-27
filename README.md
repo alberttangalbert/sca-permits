@@ -8,7 +8,7 @@ the scoring model (step 3) and data philosophy carry over. See `docs/handoff/`.
 
 ## Status
 
-This build covers **steps 0–2** for the **Permit** module:
+This build covers **steps 0–3** for the **Permit** module:
 
 - **Step 0/1 — search + parse:** page through the full public result set
   (year-chunked to beat the Elasticsearch 10k cap) and build a deduped permit
@@ -16,9 +16,14 @@ This build covers **steps 0–2** for the **Permit** module:
 - **Step 2 — detail enrichment:** one anonymous GET per record adds the fields
   search omits — **valuation** (the size signal), **owner/applicant/contractor
   contacts** (names, company, email, phone — public!), parcel/APN, and holds.
+  The recent window (2025–2026, **2,913 records**) is enriched.
+- **Step 3 — lead scoring:** rank each enriched permit into a banded lead
+  (`HIGH`/`MEDIUM`/`LOW`/`DROP`) and denormalize the best owner + contractor
+  contact for outreach. Of the 2,913 enriched records, **57 score HIGH and 84
+  MEDIUM** — a ~5% funnel of new-SFR / ADU / addition projects that are
+  approved-or-near but pre-contractor.
 
-Scoring (step 3) and D1 sync (step 4) are scaffolded in the handoff docs and come
-next.
+D1 sync (step 4) is scaffolded in the handoff docs and comes next.
 
 ## The API (verified 2026-05-26, read-only recon)
 
@@ -61,6 +66,31 @@ global `TotalFound`, and step 1 dedups on `CaseId`, so overlapping windows are f
   (`Owner`/`Applicant`/`Contractor`/`Architect`/`Engineer`/`Agent`), name, company,
   email, phone. This makes San Carlos the richest lead source of the cities so far.
 
+### Lead scoring (step 3, no scraping)
+
+A multiplicative **gates × factors** model (the cu-permits architecture,
+re-derived for San Carlos's real type/status vocabulary):
+
+```
+lead_score = 100 · type_fit · size_factor · status_factor · contractor_factor
+```
+
+- **`type_fit`** (`src/utils/step_3/type_fit_rules.json`) — ordered substring
+  match on `case_type`: new SFR / ADU / second-unit = 1.0, addition = 0.9,
+  interior remodel = 0.75, sub-trades (solar, reroof, HVAC, electrical…) ≈ 0.1,
+  commercial = 0.2. A description-keyword pass upgrades the broad
+  "Miscellaneous" bucket when it names an ADU / addition / new dwelling.
+- **`size_factor`** — bucketed from EnerGov `ValuationValue` (the size signal
+  Cupertino lacked); a missing/0 valuation is neutral, not zero.
+- **`status_factor`** — the near-issuance window scores highest (`Approved`,
+  `Fees Due`, `Fees Paid`); `Finaled` / `Expired` / `Cancelled` ≈ 0.
+- **`contractor_factor`** — a permit with **no contractor attached** is the
+  better lead (homeowner hasn't engaged one yet) → 1.0, else 0.8.
+
+Banded `HIGH ≥ 50`, `MEDIUM ≥ 22`, `LOW ≥ 7`, else `DROP`. Results land in
+`sca_leads` with the best owner/contractor contact denormalized for outreach.
+Re-scoring is a seconds-long re-run (`--rebuild`), never a re-fetch.
+
 ## Setup
 
 ```bash
@@ -84,6 +114,10 @@ python3 src/step2_fetch_details.py --start-year 2025          # fetch detail JSO
 python3 src/step2_fetch_details.py --start-year 2026 --limit 25   # smoke test
 python3 src/step2_fetch_details.py --all                     # full historical backfill (~52k GETs, long)
 python3 src/step2_parse_details.py                           # cached detail -> detail + contacts tables
+
+# Step 3 — score enriched permits into banded leads (no scraping; safe to re-run).
+python3 src/step3_score.py --rebuild                         # score everything enriched
+python3 src/step3_score.py --dry-run                         # report band/category mix, no writes
 ```
 
 `step2_fetch_details.py` requires a selection filter (`--all`, `--start-year`,
@@ -104,6 +138,7 @@ src/
   step1_parse_search_results.py   JSON -> sca_permits         (entrypoint)
   step2_fetch_details.py          per-record detail GETs      (entrypoint)
   step2_parse_details.py          detail JSON -> detail+contacts (entrypoint)
+  step3_score.py                  enriched permits -> sca_leads  (entrypoint)
   utils/
     config.py    API URLs, headers, FilterModule enum, search-body builder
     auth.py      anonymous headers (+ optional SCA_BEARER_TOKEN fallback)
@@ -113,8 +148,11 @@ src/
     step_1/parsing.py   EntityResults[] -> row dicts
     step_2/detail.py    per-record GET + caching + 429 backoff
     step_2/parsing.py   detail JSON -> detail row + contact rows (role normalize)
+    step_3/scoring.py        gates×factors model (status buckets, size, banding)
+    step_3/type_fit_rules.json  type -> score/category rule table (editable)
 migrations/0001_init_sca_permits.sql    sca_permits table
 migrations/0002_add_permit_detail.sql   sca_permit_detail + sca_permit_contacts
+migrations/0003_add_lead_scores.sql     sca_leads
 docs/handoff/                           design notes (platform, API, scoring)
 ```
 
