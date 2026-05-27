@@ -29,6 +29,17 @@ BASE_HOST = "https://sancarlosca-energovweb.tylerhost.net"
 API_BASE = f"{BASE_HOST}/apps/selfservice/api/energov"
 SEARCH_URL = f"{API_BASE}/search/search"
 
+# Step 2 detail — "Route A": the raw record GET, keyed on the CaseId GUID as a
+# PATH segment (verified 2026-05-27, anonymous, HTTP 200). Returns ValuationValue,
+# SquareFeet, and embedded Contacts[]/Addresses[]/Parcels[]/Holds[] in one call.
+# (The sibling `permits/permit?id=<GUID>` query-param route returns resolved
+# type/status NAMES + dates, but we already have those from search — so unused.)
+PERMIT_DETAIL_URL = f"{API_BASE}/permits/permit"  # + "/<CaseId>"
+
+
+def permit_detail_url(case_id: str) -> str:
+    return f"{PERMIT_DETAIL_URL}/{case_id}"
+
 # SearchModule / FilterModule enum — read from the portal's app/energov JS bundle.
 FILTER_MODULE = {
     "All": 1,
