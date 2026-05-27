@@ -152,6 +152,7 @@ python3 src/tick.py                  # refresh last 2 years (SQL-only sync)
 python3 src/tick.py --execute-sync   # ...and push to D1 (needs CF_* env)
 scripts/tick.sh                      # same, but venv-activate + tee to logs/
 python3 src/healthcheck.py           # read-only integrity check (tick runs this last)
+python3 -m unittest discover -s tests   # regression tests for the pure logic (stdlib only)
 ```
 
 Schedule it from cron, **staggered** off the sibling cities (Fremont 4:30 /
@@ -203,6 +204,7 @@ src/
     step_3/type_fit_rules.json  type -> score/category rule table (editable)
     step_3/clustering.py     parcel/address cluster key + project aggregation
 scripts/tick.sh                         cron wrapper (venv + logging) around tick.py
+tests/test_logic.py                     unittest regression tests for the pure logic
 migrations/0001_init_sca_permits.sql    sca_permits table
 migrations/0002_add_permit_detail.sql   sca_permit_detail + sca_permit_contacts
 migrations/0003_add_lead_scores.sql     sca_leads
