@@ -161,7 +161,10 @@ Santa Clara 5:30 / Cupertino 6:30) so the Tyler host never sees them at once:
 ```
 
 The tick clears the recent year-window cache before re-pulling — otherwise
-stale trailing pages could re-introduce old statuses when step 1 parses.
+stale trailing pages could re-introduce old statuses when step 1 parses. It also
+holds a run lock (no two ticks at once) and throttles to one scrape per
+`--min-interval-hours` (default 6), so a frequent scheduler can't hammer the
+Tyler host; pass `--force` to override.
 
 `step2_fetch_details.py` requires a selection filter (`--all`, `--start-year`,
 `--since`, `--status`, `--type-like`, or `--limit`) — it won't fetch all 52k

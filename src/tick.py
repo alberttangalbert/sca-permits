@@ -22,12 +22,19 @@ automates the sequence. Scheduling it (cron) is the user's call; see README.
     python3 src/tick.py --refresh-years 1
     python3 src/tick.py --dry-run        # print the plan, touch nothing
     python3 src/tick.py --execute-sync   # also push to D1 (needs CF_* env)
+    python3 src/tick.py --force          # ignore the min-interval throttle
+
+A run lock prevents two ticks at once, and --min-interval-hours (default 6)
+skips a run if one succeeded recently — so a frequent scheduler (e.g. a /loop
+every few minutes) can't hammer the live portal.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -39,10 +46,69 @@ PY = sys.executable
 MODULE = "Permit"
 RAW_SUBDIR = "permit"  # MODULES["Permit"]["raw_subdir"]
 
+# A successful tick re-pulls 2 years of search from the live Tyler host, so we
+# guard against (a) two ticks running at once and (b) hammering the portal when a
+# scheduler fires often (e.g. a /loop every 10 min). State lives in outputs/
+# (gitignored, regenerable).
+LOCK_PATH = ROOT / "outputs" / ".tick.lock"
+STATE_PATH = ROOT / "outputs" / ".tick_state.json"
+
 
 def _window_dirs(years: list[int]) -> list[Path]:
     base = ROOT / "outputs" / "raw" / "sca" / RAW_SUBDIR
     return [base / str(y) for y in years]
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # exists, owned by another user
+    return True
+
+
+def _acquire_lock() -> bool:
+    """Create the lock atomically. If it already exists for a LIVE pid, refuse;
+    a stale lock (dead pid / unreadable) is reclaimed."""
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            holder = int(LOCK_PATH.read_text().strip())
+        except (ValueError, OSError):
+            holder = -1
+        if holder != -1 and _pid_alive(holder):
+            print(f"[tick] another tick is running (pid {holder}); skipping.")
+            return False
+        print(f"[tick] reclaiming stale lock (pid {holder} not alive).")
+        LOCK_PATH.write_text(str(os.getpid()))
+        return True
+
+
+def _release_lock() -> None:
+    try:
+        LOCK_PATH.unlink()
+    except OSError:
+        pass
+
+
+def _last_success() -> dt.datetime | None:
+    try:
+        ts = json.loads(STATE_PATH.read_text())["last_success_at"]
+        return dt.datetime.fromisoformat(ts)
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _record_success() -> None:
+    now = dt.datetime.now().astimezone().replace(microsecond=0)
+    STATE_PATH.write_text(json.dumps({"last_success_at": now.isoformat()}) + "\n")
 
 
 def run_step(label: str, args: list[str], critical: bool, results: list) -> int:
@@ -86,6 +152,28 @@ def main(args) -> int:
         print(f"  7. step4 sync leads + clusters {sync_desc}")
         return 0
 
+    # Throttle: don't re-scrape the live portal more often than min-interval-hours.
+    last = _last_success()
+    if last and not args.force:
+        age_h = (dt.datetime.now().astimezone() - last).total_seconds() / 3600
+        if age_h < args.min_interval_hours:
+            print(f"[tick] last successful tick {age_h:.1f}h ago "
+                  f"(< {args.min_interval_hours}h); skipping. Use --force to override.")
+            return 0
+
+    # Single-flight: refuse to run while another tick holds the lock.
+    if not _acquire_lock():
+        return 0
+    try:
+        rc = _run_pipeline(args, start_year, today.year, years, since)
+    finally:
+        _release_lock()
+    if rc == 0:
+        _record_success()
+    return rc
+
+
+def _run_pipeline(args, start_year, end_year, years, since) -> int:
     # 1. Clear the recent year-window cache so no stale pages survive the re-pull.
     for d in _window_dirs(years):
         if d.exists():
@@ -98,7 +186,7 @@ def main(args) -> int:
     if run_step(
         "step0: re-pull recent search windows",
         [str(SRC / "step0_fetch_search_results.py"), "--module", MODULE,
-         "--start-year", str(start_year), "--end-year", str(today.year),
+         "--start-year", str(start_year), "--end-year", str(end_year),
          "--no-cache", "--page-delay", str(args.page_delay)],
         critical=True, results=results) != 0:
         return _summary(results, 2)
@@ -171,4 +259,9 @@ if __name__ == "__main__":
                    help="Pass --execute to step 4 (push to D1; needs CF_* env).")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the plan and exit; touch nothing.")
+    p.add_argument("--min-interval-hours", type=float, default=6.0,
+                   help="Skip if a successful tick ran within this many hours "
+                        "(default 6) — keeps frequent schedulers off the portal.")
+    p.add_argument("--force", action="store_true",
+                   help="Bypass the min-interval throttle and run anyway.")
     raise SystemExit(main(p.parse_args()))
