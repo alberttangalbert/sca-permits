@@ -8,7 +8,7 @@ the scoring model (step 3) and data philosophy carry over. See `docs/handoff/`.
 
 ## Status
 
-This build covers **steps 0–3** for the **Permit** module:
+This build covers **steps 0–4** for the **Permit** module:
 
 - **Step 0/1 — search + parse:** page through the full public result set
   (year-chunked to beat the Elasticsearch 10k cap) and build a deduped permit
@@ -23,7 +23,10 @@ This build covers **steps 0–3** for the **Permit** module:
   MEDIUM** — a ~5% funnel of new-SFR / ADU / addition projects that are
   approved-or-near but pre-contractor.
 
-D1 sync (step 4) is scaffolded in the handoff docs and comes next.
+- **Step 4 — D1 sync:** publish the scored leads (denormalized with address +
+  contact context) to Cloudflare D1. Defaults to generating portable SQL
+  locally; the remote push is opt-in and uses your own credentials (the leads
+  carry homeowner PII, so it never pushes without them).
 
 ## The API (verified 2026-05-26, read-only recon)
 
@@ -118,6 +121,12 @@ python3 src/step2_parse_details.py                           # cached detail -> 
 # Step 3 — score enriched permits into banded leads (no scraping; safe to re-run).
 python3 src/step3_score.py --rebuild                         # score everything enriched
 python3 src/step3_score.py --dry-run                         # report band/category mix, no writes
+
+# Step 4 — sync scored leads to Cloudflare D1 (generates SQL by default).
+python3 src/step4_sync_d1.py                                 # write d1_schema.sql + d1_sync.sql
+python3 src/step4_sync_d1.py --all                           # include DROP-band rows too
+CF_ACCOUNT_ID=… CF_D1_DATABASE_ID=… CF_API_TOKEN=… \
+  python3 src/step4_sync_d1.py --execute                     # push via D1 HTTP API (your creds)
 ```
 
 `step2_fetch_details.py` requires a selection filter (`--all`, `--start-year`,
@@ -139,6 +148,7 @@ src/
   step2_fetch_details.py          per-record detail GETs      (entrypoint)
   step2_parse_details.py          detail JSON -> detail+contacts (entrypoint)
   step3_score.py                  enriched permits -> sca_leads  (entrypoint)
+  step4_sync_d1.py                sca_leads -> Cloudflare D1 SQL/push (entrypoint)
   utils/
     config.py    API URLs, headers, FilterModule enum, search-body builder
     auth.py      anonymous headers (+ optional SCA_BEARER_TOKEN fallback)
