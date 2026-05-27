@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from utils.normalize import split_address
+from utils.step_1.parsing import map_entity, parse_page
 from utils.step_2.parsing import (_custom_fields, _fnum, _holds_summary,
                                    normalize_role, parse_detail)
 from utils.step_3.clustering import aggregate, cluster_key
@@ -213,6 +215,48 @@ class CustomFieldsAndHolds(unittest.TestCase):
         self.assertEqual(d["main_parcel"], "050011210")
         self.assertEqual(d["active_hold_count"], 1)
         self.assertEqual(d["blocking_hold_count"], 1)
+
+
+class AddressNormalization(unittest.TestCase):
+    def test_strips_city_tail(self):
+        self.assertEqual(split_address("825 INDUSTRIAL RD SAN CARLOS CA 94070"),
+                         ("825 INDUSTRIAL RD", ""))
+        self.assertEqual(
+            split_address("2017 GREENWOOD AVE, SAN CARLOS, CA 94070-1234"),
+            ("2017 GREENWOOD AVE", ""))
+
+    def test_separates_unit(self):  # multifamily must not collapse into the base
+        self.assertEqual(
+            split_address("1460 ALAMEDA, Apt 29, San Carlos CA 94070"),
+            ("1460 ALAMEDA", "APT 29"))
+
+    def test_blank_and_trailing_star(self):
+        self.assertEqual(split_address(None), ("", ""))
+        self.assertEqual(split_address("   "), ("", ""))
+        # A trailing "*" (an Accela-era flag; absent from SC data) is stripped.
+        self.assertEqual(split_address("123 MAIN ST *"), ("123 MAIN ST", ""))
+
+
+class Step1Parsing(unittest.TestCase):
+    def test_parse_page_skips_entities_without_caseid(self):
+        result = {"EntityResults": [
+            {"CaseId": "G1", "CaseNumber": "BLDR2025-1",
+             "AddressDisplay": "1 A ST SAN CARLOS CA 94070"},
+            {"CaseNumber": "NO-ID"},   # missing CaseId -> dropped (it's the PK)
+        ]}
+        rows = parse_page(result, "Permit", 3)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["case_id"], "G1")
+        self.assertEqual(rows[0]["address_norm"], "1 A ST")
+        self.assertEqual(rows[0]["source_page"], 3)
+
+    def test_map_entity_drops_nested_address_object(self):
+        # The structured `Address` object must not leak into a scalar column.
+        row = map_entity({"CaseId": "G2", "CaseNumber": "X",
+                          "AddressDisplay": "5 B AVE SAN CARLOS CA 94070",
+                          "Address": {"City": "SAN CARLOS"}}, "Permit", 1)
+        self.assertEqual(row["address_display"], "5 B AVE SAN CARLOS CA 94070")
+        self.assertEqual(row["address_norm"], "5 B AVE")
 
 
 class SqlLiteral(unittest.TestCase):
