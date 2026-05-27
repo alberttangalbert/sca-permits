@@ -83,7 +83,7 @@ def main(args) -> int:
         print(f"  5. step2 parse")
         print(f"  6. step3 score --rebuild")
         print(f"  6b. step3b cluster leads -> projects")
-        print(f"  7. step4 sync {sync_desc}")
+        print(f"  7. step4 sync leads + clusters {sync_desc}")
         return 0
 
     # 1. Clear the recent year-window cache so no stale pages survive the re-pull.
@@ -136,12 +136,15 @@ def main(args) -> int:
         [str(SRC / "step3b_cluster.py"), "--module", MODULE],
         critical=False, results=results)
 
-    # 7. Regenerate D1 sync (push only when explicitly asked + creds present).
+    # 7. Regenerate D1 sync — both per-permit leads and the deduped project list.
+    #    (push only when explicitly asked + creds present.)
     if not args.skip_sync:
-        sync_args = [str(SRC / "step4_sync_d1.py")]
-        if args.execute_sync:
-            sync_args.append("--execute")
-        run_step("step4: sync to D1", sync_args, critical=False, results=results)
+        for label, extra in (("leads", []), ("project clusters", ["--clusters"])):
+            sync_args = [str(SRC / "step4_sync_d1.py"), *extra]
+            if args.execute_sync:
+                sync_args.append("--execute")
+            run_step(f"step4: sync {label} to D1", sync_args,
+                     critical=False, results=results)
 
     return _summary(results, 0)
 

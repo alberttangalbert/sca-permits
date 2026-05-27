@@ -27,10 +27,11 @@ This build covers **steps 0–4** for the **Permit** module:
   doesn't call the same owner once per permit. Measured: 2,918 leads collapse to
   ~2,116 projects. `sca_lead_clusters` is the deduped call list (one row per
   project, anchored on the strongest permit).
-- **Step 4 — D1 sync:** publish the scored leads (denormalized with address +
-  contact + cluster context) to Cloudflare D1. Defaults to generating portable
-  SQL locally; the remote push is opt-in and uses your own credentials (the leads
-  carry homeowner PII, so it never pushes without them).
+- **Step 4 — D1 sync:** publish to the **shared `permits` D1** (the `sca_`
+  prefix keeps the tables clear of the other cities'): `sca_leads` (per-permit,
+  default) and `sca_lead_clusters` (deduped projects, `--clusters`). Defaults to
+  generating portable SQL locally; the remote push is opt-in and uses your own
+  credentials (rows carry homeowner PII, so it never pushes without them).
 
 ## The API (verified 2026-05-26, read-only recon)
 
@@ -130,11 +131,11 @@ python3 src/step3_score.py --dry-run                         # report band/categ
 python3 src/step3b_cluster.py                                # build sca_lead_clusters
 python3 src/step3b_cluster.py --dry-run                      # report collapse stats, no writes
 
-# Step 4 — sync scored leads to Cloudflare D1 (generates SQL by default).
-python3 src/step4_sync_d1.py                                 # write d1_schema.sql + d1_sync.sql
-python3 src/step4_sync_d1.py --all                           # include DROP-band rows too
-CF_ACCOUNT_ID=… CF_D1_DATABASE_ID=… CF_API_TOKEN=… \
-  python3 src/step4_sync_d1.py --execute                     # push via D1 HTTP API (your creds)
+# Step 4 — sync to the shared `permits` D1 (generates SQL by default).
+python3 src/step4_sync_d1.py                                 # per-permit leads -> d1_sync.sql
+python3 src/step4_sync_d1.py --clusters                      # deduped projects -> d1_clusters_sync.sql
+CF_ACCOUNT_ID=… CF_D1_DATABASE_ID=<shared permits D1> CF_API_TOKEN=… \
+  python3 src/step4_sync_d1.py --clusters --execute          # push via D1 HTTP API (your creds)
 ```
 
 ### Keeping it fresh — the incremental tick

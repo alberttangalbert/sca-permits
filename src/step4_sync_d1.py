@@ -1,24 +1,27 @@
-"""Step 4 (sync): publish scored leads to Cloudflare D1.
+"""Step 4 (sync): publish scored leads / project clusters to Cloudflare D1.
 
-Builds one denormalized `sca_leads` table (the lead + the permit/address context
-a frontend needs) and emits it as portable SQL. Two modes:
+Two export targets, both into the shared `permits` D1 (the `sca_` table prefix
+keeps them clear of the other cities' tables):
+
+    sca_leads          one row per scored permit (lead + address/contact/cluster)
+    sca_lead_clusters  one row per project (--clusters) — the deduped call list
+
+Emitted as portable SQL. Modes:
 
     # DEFAULT — generate SQL locally (no network, no credentials):
-    python3 src/step4_sync_d1.py
-        -> outputs/step_4/d1_schema.sql   (CREATE TABLE)
-        -> outputs/step_4/d1_sync.sql     (idempotent upserts)
-      then run it yourself with wrangler (uses YOUR auth), e.g.:
+    python3 src/step4_sync_d1.py                 # leads     -> d1_schema.sql / d1_sync.sql
+    python3 src/step4_sync_d1.py --clusters       # projects  -> d1_clusters_{schema,sync}.sql
+      then apply with wrangler using YOUR auth, e.g.:
         wrangler d1 execute <DB> --remote --file=outputs/step_4/d1_schema.sql
-        wrangler d1 execute <DB> --remote --file=outputs/step_4/d1_sync.sql
 
     # --execute — POST to the D1 HTTP API using YOUR env credentials:
     CF_ACCOUNT_ID=… CF_D1_DATABASE_ID=… CF_API_TOKEN=… \
-        python3 src/step4_sync_d1.py --execute
+        python3 src/step4_sync_d1.py --clusters --execute
 
-By default only actionable leads (HIGH/MEDIUM/LOW) are pushed; DROP noise stays
+By default only actionable bands (HIGH/MEDIUM/LOW) are pushed; DROP noise stays
 local. Use --all to include everything, --band to pick bands.
 
-This pushes data the funnel OWNS to the user's OWN store — but the leads contain
+This pushes data the funnel OWNS to the user's OWN store — but rows contain
 homeowner contact PII, so the remote push (--execute) is opt-in and never runs
 without the user's credentials in the environment.
 """
@@ -26,7 +29,6 @@ without the user's credentials in the environment.
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import os
 import sys
 from pathlib import Path
@@ -36,29 +38,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils.io import ROOT, connect
 
 OUTPUTS_DIR = ROOT / "outputs" / "step_4"
-SCHEMA_PATH = OUTPUTS_DIR / "d1_schema.sql"
-SYNC_PATH = OUTPUTS_DIR / "d1_sync.sql"
-TABLE = "sca_leads"
 CHUNK = 100  # rows per multi-row INSERT (and per HTTP request batch)
 
-# (column, SQL type) for the D1 export table — a denormalized lead + context view.
-EXPORT_COLUMNS = [
-    ("case_id", "TEXT PRIMARY KEY"), ("case_number", "TEXT"),
-    ("lead_score", "REAL"), ("lead_band", "TEXT"), ("category", "TEXT"),
-    ("status_bucket", "TEXT"), ("case_status", "TEXT"),
-    ("valuation", "REAL"), ("additional_sqft", "REAL"), ("num_stories", "REAL"),
-    ("construction_type", "TEXT"), ("blocking_hold", "INTEGER"),
-    ("has_contractor", "INTEGER"),
-    ("address_display", "TEXT"), ("main_parcel", "TEXT"),
-    ("apply_date", "TEXT"), ("issue_date", "TEXT"), ("description", "TEXT"),
-    ("owner_name", "TEXT"), ("owner_email", "TEXT"), ("owner_phone", "TEXT"),
-    ("contractor_name", "TEXT"), ("scored_at", "TEXT"),
-    ("cluster_id", "TEXT"), ("cluster_key_type", "TEXT"),  # group permits into projects
-]
-COLS = [c for c, _ in EXPORT_COLUMNS]
-
-# Column order matches EXPORT_COLUMNS / COLS exactly, so rows map 1:1.
-SELECT_SQL = f"""
+# Each export target: the D1 table, its columns (first column is the PK / upsert
+# conflict target), the SELECT that fills it IN THE SAME COLUMN ORDER, the band
+# column used for --band filtering, sort, and the indexes to create.
+LEADS_SPEC = {
+    "name": "leads",
+    "table": "sca_leads",
+    "schema_file": "d1_schema.sql",
+    "sync_file": "d1_sync.sql",
+    "columns": [
+        ("case_id", "TEXT PRIMARY KEY"), ("case_number", "TEXT"),
+        ("lead_score", "REAL"), ("lead_band", "TEXT"), ("category", "TEXT"),
+        ("status_bucket", "TEXT"), ("case_status", "TEXT"),
+        ("valuation", "REAL"), ("additional_sqft", "REAL"), ("num_stories", "REAL"),
+        ("construction_type", "TEXT"), ("blocking_hold", "INTEGER"),
+        ("has_contractor", "INTEGER"),
+        ("address_display", "TEXT"), ("main_parcel", "TEXT"),
+        ("apply_date", "TEXT"), ("issue_date", "TEXT"), ("description", "TEXT"),
+        ("owner_name", "TEXT"), ("owner_email", "TEXT"), ("owner_phone", "TEXT"),
+        ("contractor_name", "TEXT"), ("scored_at", "TEXT"),
+        ("cluster_id", "TEXT"), ("cluster_key_type", "TEXT"),
+    ],
+    "select": """
 SELECT l.case_id, p.case_number, l.lead_score, l.lead_band, l.category,
        l.status_bucket, p.case_status, l.valuation, l.additional_sqft,
        l.num_stories, l.construction_type, l.blocking_hold, l.has_contractor,
@@ -66,14 +69,47 @@ SELECT l.case_id, p.case_number, l.lead_score, l.lead_band, l.category,
        p.description, l.owner_name, l.owner_email, l.owner_phone,
        l.contractor_name, l.scored_at, l.cluster_id, l.cluster_key_type
 FROM sca_leads l JOIN sca_permits p USING(case_id)
-"""
+""",
+    "band_col": "l.lead_band",
+    "order_by": "l.lead_score DESC",
+    "indexes": [("band", "lead_band"), ("score", "lead_score")],
+}
+
+CLUSTERS_SPEC = {
+    "name": "clusters",
+    "table": "sca_lead_clusters",
+    "schema_file": "d1_clusters_schema.sql",
+    "sync_file": "d1_clusters_sync.sql",
+    "columns": [
+        ("cluster_id", "TEXT PRIMARY KEY"), ("key_type", "TEXT"),
+        ("permit_count", "INTEGER"), ("max_lead_score", "REAL"),
+        ("top_band", "TEXT"), ("categories", "TEXT"),
+        ("total_valuation", "REAL"), ("max_valuation", "REAL"),
+        ("primary_case_id", "TEXT"), ("address_display", "TEXT"),
+        ("main_parcel", "TEXT"), ("owner_name", "TEXT"),
+        ("owner_email", "TEXT"), ("owner_phone", "TEXT"),
+        ("has_contractor", "INTEGER"), ("first_apply_date", "TEXT"),
+        ("last_apply_date", "TEXT"),
+    ],
+    "select": """
+SELECT cluster_id, key_type, permit_count, max_lead_score, top_band, categories,
+       total_valuation, max_valuation, primary_case_id, address_display,
+       main_parcel, owner_name, owner_email, owner_phone, has_contractor,
+       first_apply_date, last_apply_date
+FROM sca_lead_clusters
+""",
+    "band_col": "top_band",
+    "order_by": "max_lead_score DESC",
+    "indexes": [("band", "top_band"), ("score", "max_lead_score")],
+}
 
 
-def _schema_sql() -> str:
-    cols = ",\n  ".join(f"{c} {t}" for c, t in EXPORT_COLUMNS)
-    return (f"CREATE TABLE IF NOT EXISTS {TABLE} (\n  {cols}\n);\n"
-            f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_band ON {TABLE}(lead_band);\n"
-            f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_score ON {TABLE}(lead_score);\n")
+def _schema_sql(spec) -> str:
+    cols = ",\n  ".join(f"{c} {t}" for c, t in spec["columns"])
+    idx = "".join(
+        f"CREATE INDEX IF NOT EXISTS idx_{spec['table']}_{name} "
+        f"ON {spec['table']}({expr});\n" for name, expr in spec["indexes"])
+    return f"CREATE TABLE IF NOT EXISTS {spec['table']} (\n  {cols}\n);\n" + idx
 
 
 def _lit(v) -> str:
@@ -87,27 +123,29 @@ def _lit(v) -> str:
     return "'" + str(v).replace("'", "''") + "'"
 
 
-def _fetch_rows(conn, bands, limit):
+def _fetch_rows(conn, spec, bands, limit):
     where, params = [], []
     if bands:
-        where.append(f"l.lead_band IN ({', '.join('?' for _ in bands)})")
+        where.append(f"{spec['band_col']} IN ({', '.join('?' for _ in bands)})")
         params += bands
-    sql = SELECT_SQL + (f"WHERE {' AND '.join(where)} " if where else "")
-    sql += "ORDER BY l.lead_score DESC"
+    sql = spec["select"] + (f"WHERE {' AND '.join(where)} " if where else "")
+    sql += "ORDER BY " + spec["order_by"]
     if limit:
         sql += " LIMIT ?"; params.append(limit)
     return conn.execute(sql, params).fetchall()
 
 
-def _insert_statements(rows) -> list[str]:
-    cols_sql = ", ".join(COLS)
-    updates = ", ".join(f"{c}=excluded.{c}" for c in COLS if c != "case_id")
+def _insert_statements(spec, rows) -> list[str]:
+    cols = [c for c, _ in spec["columns"]]
+    pk = cols[0]
+    cols_sql = ", ".join(cols)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != pk)
     stmts = []
     for i in range(0, len(rows), CHUNK):
         values = ",\n  ".join("(" + ", ".join(_lit(v) for v in r) + ")"
                               for r in rows[i:i + CHUNK])
-        stmts.append(f"INSERT INTO {TABLE} ({cols_sql}) VALUES\n  {values}\n"
-                     f"ON CONFLICT(case_id) DO UPDATE SET {updates};")
+        stmts.append(f"INSERT INTO {spec['table']} ({cols_sql}) VALUES\n  {values}\n"
+                     f"ON CONFLICT({pk}) DO UPDATE SET {updates};")
     return stmts
 
 
@@ -137,43 +175,48 @@ def _execute_remote(statements, log=print) -> int:
 
 def main(args) -> int:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    spec = CLUSTERS_SPEC if args.clusters else LEADS_SPEC
     bands = None if args.all else (
         [b.strip().upper() for b in args.band.split(",")] if args.band
         else ["HIGH", "MEDIUM", "LOW"])
 
     conn = connect()
     try:
-        rows = _fetch_rows(conn, bands, args.limit)
+        rows = _fetch_rows(conn, spec, bands, args.limit)
     finally:
         conn.close()
 
-    schema, inserts = _schema_sql(), _insert_statements(rows)
-    print(f"[step4] export rows: {len(rows)}  "
+    schema, inserts = _schema_sql(spec), _insert_statements(spec, rows)
+    schema_path = OUTPUTS_DIR / spec["schema_file"]
+    sync_path = OUTPUTS_DIR / spec["sync_file"]
+    print(f"[step4] {spec['name']}: export rows {len(rows)}  "
           f"(bands={bands or 'ALL'})  batches={len(inserts)}")
 
-    SCHEMA_PATH.write_text(schema)
-    SYNC_PATH.write_text("\n".join(inserts) + ("\n" if inserts else ""))
-    print(f"  wrote {SCHEMA_PATH.relative_to(ROOT)}")
-    print(f"  wrote {SYNC_PATH.relative_to(ROOT)}")
+    schema_path.write_text(schema)
+    sync_path.write_text("\n".join(inserts) + ("\n" if inserts else ""))
+    print(f"  wrote {schema_path.relative_to(ROOT)}")
+    print(f"  wrote {sync_path.relative_to(ROOT)}")
 
     if not args.execute:
         print("\n  Generated SQL only (no remote call). To publish, either run "
               "with --execute\n  (needs CF_* env vars) or apply the files with "
               "wrangler using your own auth:")
-        print(f"    wrangler d1 execute <DB> --remote --file={SCHEMA_PATH.relative_to(ROOT)}")
-        print(f"    wrangler d1 execute <DB> --remote --file={SYNC_PATH.relative_to(ROOT)}")
+        print(f"    wrangler d1 execute <DB> --remote --file={schema_path.relative_to(ROOT)}")
+        print(f"    wrangler d1 execute <DB> --remote --file={sync_path.relative_to(ROOT)}")
         return 0
 
     print("\n  --execute: pushing to D1 HTTP API …")
     rc = _execute_remote([schema, *inserts])
     if rc == 0:
-        print(f"  done — {len(rows)} leads synced to D1.")
+        print(f"  done — {len(rows)} {spec['name']} rows synced to D1.")
     return rc
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(
-        description="Step 4 (sync): scored leads -> Cloudflare D1 (SQL gen or push).")
+        description="Step 4 (sync): leads / clusters -> Cloudflare D1 (SQL gen or push).")
+    p.add_argument("--clusters", action="store_true",
+                   help="Export sca_lead_clusters (deduped projects) instead of per-permit leads.")
     p.add_argument("--all", action="store_true",
                    help="Include DROP-band rows too (default: HIGH/MEDIUM/LOW only).")
     p.add_argument("--band", help="Comma-separated bands to export (e.g. 'HIGH,MEDIUM').")
