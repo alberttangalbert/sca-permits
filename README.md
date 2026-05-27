@@ -129,6 +129,31 @@ CF_ACCOUNT_ID=… CF_D1_DATABASE_ID=… CF_API_TOKEN=… \
   python3 src/step4_sync_d1.py --execute                     # push via D1 HTTP API (your creds)
 ```
 
+### Keeping it fresh — the incremental tick
+
+A lead is only worth calling while it's live, so `src/tick.py` runs the whole
+loop incrementally: re-pull the recent ApplyDate year-windows (status — the
+score-critical field — rides on the search row, so this catches every status
+transition), parse, fetch detail **only for newly-filed permits** (cache-skips
+the rest), re-parse, re-score, and regenerate the D1 sync.
+
+```bash
+python3 src/tick.py --dry-run        # print the plan, touch nothing
+python3 src/tick.py                  # refresh last 2 years (SQL-only sync)
+python3 src/tick.py --execute-sync   # ...and push to D1 (needs CF_* env)
+scripts/tick.sh                      # same, but venv-activate + tee to logs/
+```
+
+Schedule it from cron, **staggered** off the sibling cities (Fremont 4:30 /
+Santa Clara 5:30 / Cupertino 6:30) so the Tyler host never sees them at once:
+
+```cron
+30 7 * * *  /Users/atang/Documents/scar-permits/scripts/tick.sh >> /tmp/sca_tick.cron 2>&1
+```
+
+The tick clears the recent year-window cache before re-pulling — otherwise
+stale trailing pages could re-introduce old statuses when step 1 parses.
+
 `step2_fetch_details.py` requires a selection filter (`--all`, `--start-year`,
 `--since`, `--status`, `--type-like`, or `--limit`) — it won't fetch all 52k
 implicitly. Both step 2 scripts are idempotent; the cache makes the backfill
@@ -149,6 +174,7 @@ src/
   step2_parse_details.py          detail JSON -> detail+contacts (entrypoint)
   step3_score.py                  enriched permits -> sca_leads  (entrypoint)
   step4_sync_d1.py                sca_leads -> Cloudflare D1 SQL/push (entrypoint)
+  tick.py                         incremental daily refresh orchestrator (entrypoint)
   utils/
     config.py    API URLs, headers, FilterModule enum, search-body builder
     auth.py      anonymous headers (+ optional SCA_BEARER_TOKEN fallback)
@@ -160,6 +186,7 @@ src/
     step_2/parsing.py   detail JSON -> detail row + contact rows (role normalize)
     step_3/scoring.py        gates×factors model (status buckets, size, banding)
     step_3/type_fit_rules.json  type -> score/category rule table (editable)
+scripts/tick.sh                         cron wrapper (venv + logging) around tick.py
 migrations/0001_init_sca_permits.sql    sca_permits table
 migrations/0002_add_permit_detail.sql   sca_permit_detail + sca_permit_contacts
 migrations/0003_add_lead_scores.sql     sca_leads
