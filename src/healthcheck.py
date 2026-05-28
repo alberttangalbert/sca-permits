@@ -58,6 +58,17 @@ COUNT_CHECKS = [
     ("WARN", "permits: apply_date not in the future",
      "SELECT COUNT(*) FROM sca_permits "
      "WHERE apply_date > strftime('%Y-%m-%dT%H:%M:%S','now','+2 days')"),
+    # Catches a SILENT step-2 regression: recent permits arrive via search but
+    # never get a detail row -> they vanish from scoring with no other alarm
+    # (the "every lead has detail" check passes trivially since leads derive
+    # from detail). The tick re-fetches the whole 2y window each run, so a permit
+    # filed in the last 90d has had many fetch attempts; if it still lacks detail
+    # that's a fetch outage or a permanently-erroring record. WARN, not FAIL, so a
+    # stray transient miss doesn't break the run.
+    ("WARN", "detail: recent permits (90d) have detail coverage",
+     "SELECT COUNT(*) FROM sca_permits p WHERE p.apply_date >= "
+     "date('now','-90 days') AND NOT EXISTS "
+     "(SELECT 1 FROM sca_permit_detail d WHERE d.case_id=p.case_id)"),
 ]
 
 
