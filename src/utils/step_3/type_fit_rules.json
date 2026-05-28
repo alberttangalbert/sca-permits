@@ -19,6 +19,7 @@
     { "match": "accessory structure", "type_fit": 0.7, "category": "OTHER" },
     { "match": "demolition", "type_fit": 0.45, "category": "OTHER" },
     { "match": "multi-residential", "type_fit": 0.5, "category": "COMMERCIAL" },
+    { "match": "apartment", "type_fit": 0.5, "category": "COMMERCIAL" },
 
     { "match": "retaining wall", "type_fit": 0.3, "category": "OTHER" },
     { "match": "pool", "type_fit": 0.3, "category": "SUBTRADE" },

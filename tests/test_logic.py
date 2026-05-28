@@ -48,6 +48,14 @@ class TypeFit(unittest.TestCase):
         self.assertEqual(classify_type("Building Commercial-Addition", None),
                          (0.2, "COMMERCIAL"))
 
+    def test_apartment_scores_as_multifamily(self):
+        # Apartment/multi-family permits are real GC work, scored like the
+        # near-identical 'multi-residential' type (0.5), not the 0.30 fallback.
+        self.assertEqual(classify_type("Apartment  - Apartment", None),
+                         (0.5, "COMMERCIAL"))
+        self.assertEqual(classify_type("Building Residential-Multi-Residential", None),
+                         (0.5, "COMMERCIAL"))
+
     def test_subtrades_are_low(self):
         for t in ("MEP - Solar App", "Building Residential - Reroof",
                   "Electrical Service", "Water Heater"):
