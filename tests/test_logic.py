@@ -126,6 +126,26 @@ class Contacts(unittest.TestCase):
         self.assertEqual(picked["has_contractor"], 0)
         self.assertIsNone(picked["contractor_name"])
 
+    def test_contactless_owner_falls_through_to_reachable_applicant(self):
+        # Owner row exists but has only a name; the applicant holds the phone.
+        # We must surface the reachable applicant, not strand the lead.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "Nameonly Owner", "email": None,
+             "phone": None},
+            {"role": "APPLICANT", "full_name": "Reachable App", "email": None,
+             "phone": "555-9"}])
+        self.assertEqual(picked["owner_phone"], "555-9")
+        self.assertEqual(picked["owner_name"], "Reachable App")
+
+    def test_reachable_owner_still_wins_over_applicant(self):
+        # When the owner IS reachable, keep preferring the owner.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "Owner", "email": "o@x", "phone": None},
+            {"role": "APPLICANT", "full_name": "App", "email": "a@x",
+             "phone": "555-1"}])
+        self.assertEqual(picked["owner_name"], "Owner")
+        self.assertEqual(picked["owner_email"], "o@x")
+
 
 class ScoreRecord(unittest.TestCase):
     def test_blocking_hold_and_contractor_factors(self):

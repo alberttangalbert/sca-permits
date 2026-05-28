@@ -142,7 +142,22 @@ def pick_contacts(contacts: list[dict]) -> dict:
         return max(cands, key=lambda c: (bool(c.get("email")), bool(c.get("phone")),
                                          bool(c.get("full_name"))))
 
-    owner = best(owners) or best(applicants)
+    def reachable(c):
+        return bool(c and (c.get("email") or c.get("phone")))
+
+    # Prefer the owner, but only when we can actually reach them. On residential
+    # permits the applicant is usually the owner or their agent, so when the
+    # owner record carries a name but no phone/email, fall through to a reachable
+    # applicant instead of surfacing a dead contact. (The old `best(owners) or
+    # best(applicants)` only fell back when NO owner row existed at all, which
+    # stranded 18 actionable leads whose applicant held the only phone/email.)
+    bo, ba = best(owners), best(applicants)
+    if reachable(bo):
+        owner = bo
+    elif reachable(ba):
+        owner = ba
+    else:
+        owner = bo or ba
     contractor = best(contractors)
     return {
         "owner_name": (owner or {}).get("full_name") or (owner or {}).get("company"),
