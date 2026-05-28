@@ -140,6 +140,24 @@ def _missing_detail_count() -> int:
         conn.close()
 
 
+def should_refresh(force: bool, last: dt.datetime | None, now: dt.datetime,
+                   min_interval_hours: float) -> bool:
+    """Whether to run the heavy SEARCH re-pull this fire: forced, or no prior
+    successful run, or the throttle window has elapsed. Pure (no I/O) so the
+    two-cadence gate — the pipeline's one portal-politeness decision — is tested
+    rather than trusted to `or` short-circuiting around a None age."""
+    if force or last is None:
+        return True
+    return (now - last).total_seconds() / 3600 >= min_interval_hours
+
+
+def should_skip_entirely(do_refresh: bool, backfill_chunk: int,
+                         missing: int) -> bool:
+    """Nothing to do at all (so the tick can return without taking the lock):
+    the refresh is throttled AND the backfill is disabled or already complete."""
+    return (not do_refresh) and (backfill_chunk <= 0 or missing <= 0)
+
+
 def run_step(label: str, args: list[str], critical: bool, results: list) -> int:
     """Run one entrypoint as a subprocess; record its rc. A failing CRITICAL step
     aborts the tick (no point scoring with no data); non-critical steps warn."""
@@ -174,9 +192,9 @@ def main(args) -> int:
     # DETAIL backfill is different: cheap per-record GETs that chip away at the
     # ~50k un-enriched records, so it runs EVERY fire until complete.
     last = _last_success()
-    age_h = ((dt.datetime.now().astimezone() - last).total_seconds() / 3600
-             if last else None)
-    do_refresh = args.force or last is None or age_h >= args.min_interval_hours
+    now = dt.datetime.now().astimezone()
+    age_h = (now - last).total_seconds() / 3600 if last else None
+    do_refresh = should_refresh(args.force, last, now, args.min_interval_hours)
 
     if args.dry_run:
         print("\n[tick] DRY RUN — plan only, nothing fetched/cleared/written:")
@@ -201,7 +219,7 @@ def main(args) -> int:
     # Nothing to do only when the refresh is throttled AND the backfill is done
     # (or disabled): then we skip cheaply without even taking the lock.
     missing = _missing_detail_count()
-    if not do_refresh and (args.backfill_chunk <= 0 or missing == 0):
+    if should_skip_entirely(do_refresh, args.backfill_chunk, missing):
         print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h) "
               f"and backfill complete (missing detail: {missing}); nothing to do.")
         return 0

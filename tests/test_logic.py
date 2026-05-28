@@ -24,9 +24,12 @@ from utils.step_3.scoring import (band, classify_type, pick_contacts,
                                    score_record, size_factor, status_factor)
 import sqlite3
 
+import datetime as dt
+
 from step2_fetch_details import select_case_ids
 from step2_parse_details import unparsed_files
 from step4_sync_d1 import _lit, _prune_statement
+from tick import should_refresh, should_skip_entirely
 
 
 class TypeFit(unittest.TestCase):
@@ -367,6 +370,38 @@ class UnparsedFiles(unittest.TestCase):
     def test_all_when_none_parsed(self):
         files = self._files("a", "b")
         self.assertEqual(unparsed_files(files, set()), files)
+
+
+class TickCadence(unittest.TestCase):
+    """The two-cadence gate: when to do the heavy search re-pull vs. skip. This
+    is the pipeline's one portal-politeness decision, so it gets locked down."""
+
+    NOW = dt.datetime(2026, 5, 28, 12, 0, tzinfo=dt.timezone.utc)
+
+    def test_refresh_when_no_prior_run(self):
+        self.assertTrue(should_refresh(False, None, self.NOW, 6.0))
+
+    def test_refresh_when_forced_even_if_recent(self):
+        recent = self.NOW - dt.timedelta(hours=1)
+        self.assertTrue(should_refresh(True, recent, self.NOW, 6.0))
+
+    def test_no_refresh_within_throttle_window(self):
+        recent = self.NOW - dt.timedelta(hours=2)
+        self.assertFalse(should_refresh(False, recent, self.NOW, 6.0))
+
+    def test_refresh_once_window_elapsed(self):
+        old = self.NOW - dt.timedelta(hours=6, minutes=1)
+        self.assertTrue(should_refresh(False, old, self.NOW, 6.0))
+
+    def test_skip_entirely_only_when_throttled_and_backfill_done(self):
+        # throttled + nothing missing -> skip
+        self.assertTrue(should_skip_entirely(False, 200, 0))
+        # throttled + backfill disabled -> skip
+        self.assertTrue(should_skip_entirely(False, 0, 999))
+        # throttled but records still missing -> backfill-only pass, don't skip
+        self.assertFalse(should_skip_entirely(False, 200, 999))
+        # refreshing -> never skip, regardless of backfill state
+        self.assertFalse(should_skip_entirely(True, 0, 0))
 
 
 if __name__ == "__main__":
