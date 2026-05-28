@@ -69,6 +69,14 @@ COUNT_CHECKS = [
      "SELECT COUNT(*) FROM sca_permits p WHERE p.apply_date >= "
      "date('now','-90 days') AND NOT EXISTS "
      "(SELECT 1 FROM sca_permit_detail d WHERE d.case_id=p.case_id)"),
+    # Actionable leads (HIGH/MEDIUM) the GC can't actually reach — no email AND
+    # no phone on the chosen owner contact. The pipeline scored them correctly;
+    # the gap is in the source's contact data, so WARN (never FAIL) and let the
+    # count trend: it tells the operator how much of the callable funnel is dead.
+    ("WARN", "leads: actionable (HIGH/MEDIUM) leads have a reachable contact",
+     "SELECT COUNT(*) FROM sca_leads WHERE lead_band IN ('HIGH','MEDIUM') "
+     "AND (owner_email IS NULL OR owner_email='') "
+     "AND (owner_phone IS NULL OR owner_phone='')"),
 ]
 
 
