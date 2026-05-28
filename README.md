@@ -145,14 +145,26 @@ CF_ACCOUNT_ID=… CF_D1_DATABASE_ID=<shared permits D1> CF_API_TOKEN=… \
 ### Keeping it fresh — the incremental tick
 
 A lead is only worth calling while it's live, so `src/tick.py` runs the whole
-loop incrementally: re-pull the recent ApplyDate year-windows (status — the
-score-critical field — rides on the search row, so this catches every status
-transition), parse, fetch detail **only for newly-filed permits** (cache-skips
-the rest), re-parse, re-score, and regenerate the D1 sync.
+loop incrementally, on **two cadences**:
+
+- **Search re-pull (throttled, default every 6h):** re-pull the recent ApplyDate
+  year-windows (status — the score-critical field — rides on the search row, so
+  this catches every status transition), parse, and fetch detail **only for
+  newly-filed permits** (cache-skips the rest). `--min-interval-hours` guards the
+  live portal so a frequent scheduler can't hammer it.
+- **Historical detail backfill (every fire):** enrich a `--backfill-chunk`
+  (default 200, newest-missing first) of the ~50k older permits that are still
+  search-only, until the whole history has detail. It self-quiesces when nothing
+  is missing, and a fully-throttled, fully-backfilled tick skips without even
+  taking the lock.
+
+Both feed the same re-parse → re-score → re-cluster → D1-sync tail.
 
 ```bash
 python3 src/tick.py --dry-run        # print the plan, touch nothing
-python3 src/tick.py                  # refresh last 2 years (SQL-only sync)
+python3 src/tick.py                  # refresh (if due) + backfill 200 (SQL-only sync)
+python3 src/tick.py --backfill-chunk 500   # enrich more history per fire
+python3 src/tick.py --backfill-chunk 0     # refresh only, no backfill
 python3 src/tick.py --execute-sync   # ...and push to D1 (needs CF_* env)
 scripts/tick.sh                      # same, but venv-activate + tee to logs/
 python3 src/healthcheck.py           # read-only integrity check (tick runs this last)

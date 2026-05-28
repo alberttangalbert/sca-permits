@@ -49,7 +49,8 @@ def fetch_runs_json_for(module: str) -> Path:
 
 def select_case_ids(conn, module: str, start_year: int | None, end_year: int | None,
                     since: str | None, statuses: list[str] | None,
-                    type_like: str | None, limit: int | None) -> list[str]:
+                    type_like: str | None, limit: int | None,
+                    missing_detail: bool = False) -> list[str]:
     where = ["module = ?"]
     params: list = [module]
     # apply_date is an ISO string; year/date prefix comparisons work lexically.
@@ -64,6 +65,12 @@ def select_case_ids(conn, module: str, start_year: int | None, end_year: int | N
         params.extend(statuses)
     if type_like:
         where.append("case_type LIKE ?"); params.append(f"%{type_like}%")
+    if missing_detail:
+        # Only records not yet enriched — drives the progressive history backfill.
+        where.append("NOT EXISTS (SELECT 1 FROM sca_permit_detail d "
+                     "WHERE d.case_id = sca_permits.case_id)")
+    # Newest first: if you only enrich a slice, the most recent (most relevant)
+    # records win.
     sql = (f"SELECT case_id FROM sca_permits WHERE {' AND '.join(where)} "
            f"ORDER BY apply_date DESC")
     if limit:
@@ -77,10 +84,10 @@ def main(args) -> int:
         print(f"[error] unknown module {module!r}", file=sys.stderr)
         return 2
     if not any([args.all, args.start_year, args.end_year, args.since,
-                args.status, args.type_like, args.limit]):
+                args.status, args.type_like, args.limit, args.missing_detail]):
         print("[error] refusing to select ALL records implicitly; pass --all "
-              "or a filter (--start-year / --since / --status / --limit).",
-              file=sys.stderr)
+              "or a filter (--start-year / --since / --status / --limit / "
+              "--missing-detail).", file=sys.stderr)
         return 2
 
     started = dt.datetime.now().astimezone().replace(microsecond=0)
@@ -91,7 +98,7 @@ def main(args) -> int:
     try:
         case_ids = select_case_ids(
             conn, module, args.start_year, args.end_year, args.since,
-            statuses, args.type_like, args.limit)
+            statuses, args.type_like, args.limit, args.missing_detail)
     finally:
         conn.close()
 
@@ -125,6 +132,7 @@ def main(args) -> int:
             "start_year": args.start_year, "end_year": args.end_year,
             "since": args.since, "status": args.status,
             "type_like": args.type_like, "limit": args.limit, "all": args.all,
+            "missing_detail": args.missing_detail,
         },
         **audit,
     })
@@ -148,6 +156,9 @@ if __name__ == "__main__":
                                     "(e.g. 'Issued,Approved,In Review').")
     p.add_argument("--type-like", help="SQL LIKE fragment on case_type "
                                        "(e.g. 'Residential').")
+    p.add_argument("--missing-detail", action="store_true",
+                   help="Only records that lack a parsed detail row (drives the "
+                        "progressive historical backfill; combine with --limit).")
     p.add_argument("--limit", type=int, help="Cap the number of records.")
     p.add_argument("--page-delay", type=float, default=0.3,
                    help="Seconds between GETs (default 0.3).")

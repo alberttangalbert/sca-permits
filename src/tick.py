@@ -15,18 +15,28 @@ refresh loop the handoff describes:
   5. Re-score everything (cheap; picks up new permits + changed statuses).
   6. Regenerate the D1 sync SQL (push only with --execute-sync + your creds).
 
+Two cadences in one tick:
+  - The SEARCH re-pull (steps 1-4) is THROTTLED to --min-interval-hours (default
+    6): it hammers the live portal and new permits trickle in slowly.
+  - The historical DETAIL backfill runs EVERY fire — a polite --backfill-chunk
+    of per-record GETs for the oldest-not-yet-enriched permits — until all ~50k
+    have detail. Then it self-quiesces (nothing missing -> nothing fetched), and
+    a fully-throttled, fully-backfilled tick skips cheaply without taking the lock.
+
 Anonymous, read-only, single-IP — same posture as a manual run; this only
 automates the sequence. Scheduling it (cron) is the user's call; see README.
 
-    python3 src/tick.py                  # default: refresh last 2 years
+    python3 src/tick.py                  # default: refresh last 2y + backfill 200
     python3 src/tick.py --refresh-years 1
+    python3 src/tick.py --backfill-chunk 500   # enrich more history per fire
+    python3 src/tick.py --backfill-chunk 0     # disable backfill (refresh only)
     python3 src/tick.py --dry-run        # print the plan, touch nothing
     python3 src/tick.py --execute-sync   # also push to D1 (needs CF_* env)
     python3 src/tick.py --force          # ignore the min-interval throttle
 
 A run lock prevents two ticks at once, and --min-interval-hours (default 6)
-skips a run if one succeeded recently — so a frequent scheduler (e.g. a /loop
-every few minutes) can't hammer the live portal.
+skips the search re-pull if one ran recently — so a frequent scheduler (e.g. a
+/loop every few minutes) can't hammer the live portal.
 """
 
 from __future__ import annotations
@@ -45,6 +55,9 @@ SRC = ROOT / "src"
 PY = sys.executable
 MODULE = "Permit"
 RAW_SUBDIR = "permit"  # MODULES["Permit"]["raw_subdir"]
+
+sys.path.insert(0, str(SRC))
+from utils.io import DB_PATH, connect  # noqa: E402  (after SRC is on the path)
 
 # A successful tick re-pulls 2 years of search from the live Tyler host, so we
 # guard against (a) two ticks running at once and (b) hammering the portal when a
@@ -111,6 +124,22 @@ def _record_success() -> None:
     STATE_PATH.write_text(json.dumps({"last_success_at": now.isoformat()}) + "\n")
 
 
+def _missing_detail_count() -> int:
+    """Permits with no parsed detail row yet — the historical backfill remaining."""
+    if not DB_PATH.exists():
+        return 0
+    conn = connect()
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM sca_permits p WHERE NOT EXISTS "
+            "(SELECT 1 FROM sca_permit_detail d WHERE d.case_id = p.case_id)"
+        ).fetchone()[0]
+    except Exception:
+        return 0  # tables not created yet — a real refresh will build them
+    finally:
+        conn.close()
+
+
 def run_step(label: str, args: list[str], critical: bool, results: list) -> int:
     """Run one entrypoint as a subprocess; record its rc. A failing CRITICAL step
     aborts the tick (no point scoring with no data); non-critical steps warn."""
@@ -140,12 +169,28 @@ def main(args) -> int:
     else:
         sync_desc = "(SQL only)"
 
+    # The heavy 2-year SEARCH re-pull is throttled to --min-interval-hours (it
+    # hammers the live portal and new permits trickle in slowly). The historical
+    # DETAIL backfill is different: cheap per-record GETs that chip away at the
+    # ~50k un-enriched records, so it runs EVERY fire until complete.
+    last = _last_success()
+    age_h = ((dt.datetime.now().astimezone() - last).total_seconds() / 3600
+             if last else None)
+    do_refresh = args.force or last is None or age_h >= args.min_interval_hours
+
     if args.dry_run:
         print("\n[tick] DRY RUN — plan only, nothing fetched/cleared/written:")
-        print(f"  1. clear cache dirs: {[str(d.relative_to(ROOT)) for d in _window_dirs(years)]}")
-        print(f"  2. step0 --start-year {start_year} --end-year {today.year} --no-cache")
-        print(f"  3. step1 parse")
-        print(f"  4. step2 fetch --since {since}   (cache-skips existing -> new only)")
+        if do_refresh:
+            print(f"  REFRESH (search re-pull) WILL run "
+                  f"({'forced' if args.force else 'throttle elapsed' if last else 'no prior run'}):")
+            print(f"  1. clear cache dirs: {[str(d.relative_to(ROOT)) for d in _window_dirs(years)]}")
+            print(f"  2. step0 --start-year {start_year} --end-year {today.year} --no-cache")
+            print(f"  3. step1 parse")
+            print(f"  4. step2 fetch --since {since}   (cache-skips existing -> new only)")
+        else:
+            print(f"  REFRESH skipped (last run {age_h:.1f}h ago < {args.min_interval_hours}h).")
+        print(f"  4b. step2 backfill --missing-detail --limit {args.backfill_chunk}"
+              f"   ({_missing_detail_count()} records still lack detail)")
         print(f"  5. step2 parse")
         print(f"  6. step3 score --rebuild")
         print(f"  6b. step3b cluster leads -> projects")
@@ -153,58 +198,73 @@ def main(args) -> int:
         print(f"  8. healthcheck verify DB integrity")
         return 0
 
-    # Throttle: don't re-scrape the live portal more often than min-interval-hours.
-    last = _last_success()
-    if last and not args.force:
-        age_h = (dt.datetime.now().astimezone() - last).total_seconds() / 3600
-        if age_h < args.min_interval_hours:
-            print(f"[tick] last successful tick {age_h:.1f}h ago "
-                  f"(< {args.min_interval_hours}h); skipping. Use --force to override.")
-            return 0
+    # Nothing to do only when the refresh is throttled AND the backfill is done
+    # (or disabled): then we skip cheaply without even taking the lock.
+    missing = _missing_detail_count()
+    if not do_refresh and (args.backfill_chunk <= 0 or missing == 0):
+        print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h) "
+              f"and backfill complete (missing detail: {missing}); nothing to do.")
+        return 0
+    if not do_refresh:
+        print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h); "
+              f"backfill-only pass — {missing} records still lack detail.")
 
     # Single-flight: refuse to run while another tick holds the lock.
     if not _acquire_lock():
         return 0
     try:
-        rc = _run_pipeline(args, start_year, today.year, years, since)
+        rc = _run_pipeline(args, start_year, today.year, years, since, do_refresh)
     finally:
         _release_lock()
-    if rc == 0:
+    # Only a real refresh resets the throttle clock; backfill-only passes don't
+    # (else the every-fire backfill would keep the refresh from ever running).
+    if rc == 0 and do_refresh:
         _record_success()
     return rc
 
 
-def _run_pipeline(args, start_year, end_year, years, since) -> int:
-    # 1. Clear the recent year-window cache so no stale pages survive the re-pull.
-    for d in _window_dirs(years):
-        if d.exists():
-            shutil.rmtree(d)
-            print(f"[tick] cleared stale cache {d.relative_to(ROOT)}")
-
+def _run_pipeline(args, start_year, end_year, years, since, do_refresh) -> int:
     results: list = []
 
-    # 2. Re-pull recent search windows (fresh statuses + newly-filed permits).
-    if run_step(
-        "step0: re-pull recent search windows",
-        [str(SRC / "step0_fetch_search_results.py"), "--module", MODULE,
-         "--start-year", str(start_year), "--end-year", str(end_year),
-         "--no-cache", "--page-delay", str(args.page_delay)],
-        critical=True, results=results) != 0:
-        return _summary(results, 2)
+    if do_refresh:
+        # 1. Clear the recent year-window cache so no stale pages survive the re-pull.
+        for d in _window_dirs(years):
+            if d.exists():
+                shutil.rmtree(d)
+                print(f"[tick] cleared stale cache {d.relative_to(ROOT)}")
 
-    # 3. Parse search -> sca_permits (idempotent; refreshes status/dates).
-    if run_step(
-        "step1: parse search -> sca_permits",
-        [str(SRC / "step1_parse_search_results.py"), "--module", MODULE],
-        critical=True, results=results) != 0:
-        return _summary(results, 2)
+        # 2. Re-pull recent search windows (fresh statuses + newly-filed permits).
+        if run_step(
+            "step0: re-pull recent search windows",
+            [str(SRC / "step0_fetch_search_results.py"), "--module", MODULE,
+             "--start-year", str(start_year), "--end-year", str(end_year),
+             "--no-cache", "--page-delay", str(args.page_delay)],
+            critical=True, results=results) != 0:
+            return _summary(results, 2)
 
-    # 4. Fetch detail for NEW records in the window (cache-skip = only the new).
-    run_step(
-        "step2: fetch detail for new records",
-        [str(SRC / "step2_fetch_details.py"), "--module", MODULE,
-         "--since", since, "--page-delay", str(args.detail_delay)],
-        critical=False, results=results)
+        # 3. Parse search -> sca_permits (idempotent; refreshes status/dates).
+        if run_step(
+            "step1: parse search -> sca_permits",
+            [str(SRC / "step1_parse_search_results.py"), "--module", MODULE],
+            critical=True, results=results) != 0:
+            return _summary(results, 2)
+
+        # 4. Fetch detail for NEW records in the window (cache-skip = only the new).
+        run_step(
+            "step2: fetch detail for new records",
+            [str(SRC / "step2_fetch_details.py"), "--module", MODULE,
+             "--since", since, "--page-delay", str(args.detail_delay)],
+            critical=False, results=results)
+
+    # 4b. Progressive historical backfill: enrich a chunk of the oldest-missing
+    #     records every fire (newest-first) until the whole history has detail.
+    if args.backfill_chunk > 0:
+        run_step(
+            f"step2: backfill historical detail (newest {args.backfill_chunk} missing)",
+            [str(SRC / "step2_fetch_details.py"), "--module", MODULE,
+             "--missing-detail", "--limit", str(args.backfill_chunk),
+             "--page-delay", str(args.detail_delay)],
+            critical=False, results=results)
 
     # 5. Parse detail -> detail + contacts.
     run_step(
@@ -261,6 +321,11 @@ if __name__ == "__main__":
                    help="Seconds between search pages (default 1.0).")
     p.add_argument("--detail-delay", type=float, default=0.3,
                    help="Seconds between detail GETs (default 0.3).")
+    p.add_argument("--backfill-chunk", type=int, default=200,
+                   help="Historical-detail records to enrich per fire (newest "
+                        "missing first), separate from the throttled refresh; "
+                        "runs every tick until the ~50k history is complete. "
+                        "0 disables (default 200).")
     p.add_argument("--skip-sync", action="store_true",
                    help="Don't run step 4 (no D1 SQL regeneration).")
     p.add_argument("--execute-sync", action="store_true",

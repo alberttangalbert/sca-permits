@@ -22,6 +22,9 @@ from utils.step_2.parsing import (_custom_fields, _fnum, _holds_summary,
 from utils.step_3.clustering import aggregate, cluster_key
 from utils.step_3.scoring import (band, classify_type, pick_contacts,
                                    score_record, size_factor, status_factor)
+import sqlite3
+
+from step2_fetch_details import select_case_ids
 from step4_sync_d1 import _lit, _prune_statement
 
 
@@ -309,6 +312,39 @@ class PruneStatement(unittest.TestCase):
         # an empty export mirrors to an empty table (no NOT IN with no values)
         self.assertEqual(_prune_statement(self.SPEC, []),
                          "DELETE FROM sca_leads;")
+
+
+class MissingDetailSelection(unittest.TestCase):
+    """The historical-backfill selector: --missing-detail picks only permits with
+    no parsed detail row, newest-first, respecting the chunk limit."""
+
+    def _db(self):
+        c = sqlite3.connect(":memory:")
+        c.executescript("""
+            CREATE TABLE sca_permits (case_id TEXT PRIMARY KEY, module TEXT,
+                apply_date TEXT, case_status TEXT, case_type TEXT);
+            CREATE TABLE sca_permit_detail (case_id TEXT PRIMARY KEY);
+        """)
+        c.executemany("INSERT INTO sca_permits VALUES (?,?,?,?,?)", [
+            ("p-new", "Permit", "2026-03-01T00:00:00", "In Review", "X"),
+            ("p-mid", "Permit", "2025-06-01T00:00:00", "Issued", "X"),
+            ("p-old", "Permit", "2024-01-01T00:00:00", "Complete", "X"),
+        ])
+        c.execute("INSERT INTO sca_permit_detail (case_id) VALUES ('p-mid')")
+        c.commit()
+        return c
+
+    def test_excludes_already_detailed_newest_first(self):
+        c = self._db()
+        got = select_case_ids(c, "Permit", None, None, None, None, None, None,
+                              missing_detail=True)
+        self.assertEqual(got, ["p-new", "p-old"])  # p-mid has detail -> excluded
+
+    def test_respects_limit(self):
+        c = self._db()
+        got = select_case_ids(c, "Permit", None, None, None, None, None, 1,
+                              missing_detail=True)
+        self.assertEqual(got, ["p-new"])  # newest missing wins the single slot
 
 
 if __name__ == "__main__":
