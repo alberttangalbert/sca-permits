@@ -21,6 +21,12 @@ Emitted as portable SQL. Modes:
 By default only actionable bands (HIGH/MEDIUM/LOW) are pushed; DROP noise stays
 local. Use --all to include everything, --band to pick bands.
 
+The upsert never deletes, so a lead that LEAVES the actionable set (e.g. a permit
+gets issued/completed -> its score drops to band DROP) would linger forever in
+D1 as a stale "actionable" row. Pass --prune to append a mirror-delete that makes
+D1 contain exactly this export (scoped to the sca_ table; can't touch other
+cities). --prune is incompatible with --limit (a partial export must not prune).
+
 This pushes data the funnel OWNS to the user's OWN store — but rows contain
 homeowner contact PII, so the remote push (--execute) is opt-in and never runs
 without the user's credentials in the environment.
@@ -149,6 +155,20 @@ def _insert_statements(spec, rows) -> list[str]:
     return stmts
 
 
+def _prune_statement(spec, rows) -> str:
+    """Mirror semantics: delete remote rows NOT in this export, so a lead that
+    left the actionable set (e.g. issued/completed -> band DROP) doesn't linger
+    in D1 forever (the upsert alone never removes it). Runs AFTER the inserts, so
+    the fresh rows are already present even though delete is the last statement.
+    Scoped to spec['table'] (the sca_ prefix) -> it can't touch other cities'
+    tables in the shared D1. An empty export mirrors to an empty table."""
+    pk = spec["columns"][0][0]
+    if not rows:
+        return f"DELETE FROM {spec['table']};"
+    keep = ", ".join(_lit(r[0]) for r in rows)
+    return f"DELETE FROM {spec['table']} WHERE {pk} NOT IN ({keep});"
+
+
 def _execute_remote(statements, log=print) -> int:
     """POST each statement batch to the D1 HTTP API using env credentials."""
     import requests
@@ -180,6 +200,12 @@ def main(args) -> int:
         [b.strip().upper() for b in args.band.split(",")] if args.band
         else ["HIGH", "MEDIUM", "LOW"])
 
+    if args.prune and args.limit:
+        print("[error] --prune mirrors the full export to D1, so it can't be "
+              "combined with --limit (a partial export would delete the rest). "
+              "Aborting (no files written).")
+        return 2
+
     conn = connect()
     try:
         rows = _fetch_rows(conn, spec, bands, args.limit)
@@ -187,15 +213,19 @@ def main(args) -> int:
         conn.close()
 
     schema, inserts = _schema_sql(spec), _insert_statements(spec, rows)
+    prune = _prune_statement(spec, rows) if args.prune else None
+    body = inserts + ([prune] if prune else [])
     schema_path = OUTPUTS_DIR / spec["schema_file"]
     sync_path = OUTPUTS_DIR / spec["sync_file"]
     print(f"[step4] {spec['name']}: export rows {len(rows)}  "
-          f"(bands={bands or 'ALL'})  batches={len(inserts)}")
+          f"(bands={bands or 'ALL'})  batches={len(inserts)}"
+          f"{'  +prune' if prune else ''}")
 
     schema_path.write_text(schema)
-    sync_path.write_text("\n".join(inserts) + ("\n" if inserts else ""))
+    sync_path.write_text(("\n".join(body) + "\n") if body else "")
     print(f"  wrote {schema_path.relative_to(ROOT)}")
-    print(f"  wrote {sync_path.relative_to(ROOT)}")
+    print(f"  wrote {sync_path.relative_to(ROOT)}"
+          + ("  (ends with a prune DELETE -> D1 mirrors this export)" if prune else ""))
 
     if not args.execute:
         print("\n  Generated SQL only (no remote call). To publish, either run "
@@ -206,9 +236,10 @@ def main(args) -> int:
         return 0
 
     print("\n  --execute: pushing to D1 HTTP API …")
-    rc = _execute_remote([schema, *inserts])
+    rc = _execute_remote([schema, *body])
     if rc == 0:
-        print(f"  done — {len(rows)} {spec['name']} rows synced to D1.")
+        print(f"  done — {len(rows)} {spec['name']} rows synced to D1"
+              + (" (stale rows pruned)." if prune else "."))
     return rc
 
 
@@ -221,6 +252,10 @@ if __name__ == "__main__":
                    help="Include DROP-band rows too (default: HIGH/MEDIUM/LOW only).")
     p.add_argument("--band", help="Comma-separated bands to export (e.g. 'HIGH,MEDIUM').")
     p.add_argument("--limit", type=int, help="Cap exported rows.")
+    p.add_argument("--prune", action="store_true",
+                   help="Append a DELETE so D1 mirrors exactly this export "
+                        "(removes leads that left the actionable set). Cannot be "
+                        "combined with --limit.")
     p.add_argument("--execute", action="store_true",
                    help="POST to the D1 HTTP API using CF_* env vars (opt-in).")
     raise SystemExit(main(p.parse_args()))

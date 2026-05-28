@@ -228,8 +228,11 @@ def _run_pipeline(args, start_year, end_year, years, since) -> int:
     # 7. Regenerate D1 sync — both per-permit leads and the deduped project list.
     #    (push only when explicitly asked + creds present.)
     if not args.skip_sync:
+        # --prune keeps the generated SQL a true mirror: leads that fell out of
+        # the actionable set (issued/completed -> DROP) are removed, not left
+        # stale. Safe here -- the tick exports the full set (no --limit).
         for label, extra in (("leads", []), ("project clusters", ["--clusters"])):
-            sync_args = [str(SRC / "step4_sync_d1.py"), *extra]
+            sync_args = [str(SRC / "step4_sync_d1.py"), *extra, "--prune"]
             if args.execute_sync:
                 sync_args.append("--execute")
             run_step(f"step4: sync {label} to D1", sync_args,

@@ -22,7 +22,7 @@ from utils.step_2.parsing import (_custom_fields, _fnum, _holds_summary,
 from utils.step_3.clustering import aggregate, cluster_key
 from utils.step_3.scoring import (band, classify_type, pick_contacts,
                                    score_record, size_factor, status_factor)
-from step4_sync_d1 import _lit
+from step4_sync_d1 import _lit, _prune_statement
 
 
 class TypeFit(unittest.TestCase):
@@ -268,6 +268,27 @@ class SqlLiteral(unittest.TestCase):
         self.assertEqual(_lit(5.5), "5.5")
         self.assertEqual(_lit("plain"), "'plain'")
         self.assertEqual(_lit("it's a 10'-0\" deck"), "'it''s a 10''-0\" deck'")
+
+
+class PruneStatement(unittest.TestCase):
+    SPEC = {"table": "sca_leads", "columns": [("case_id", "TEXT PRIMARY KEY"),
+                                              ("lead_score", "REAL")]}
+
+    def test_prune_keeps_only_exported_pks(self):
+        rows = [("a-1", 90.0), ("b-2", 40.0)]
+        sql = _prune_statement(self.SPEC, rows)
+        # mirror-delete scoped to the table, keyed on the PK, escaping each id
+        self.assertEqual(
+            sql, "DELETE FROM sca_leads WHERE case_id NOT IN ('a-1', 'b-2');")
+
+    def test_prune_escapes_quotes_in_ids(self):
+        sql = _prune_statement(self.SPEC, [("o'brien", 1.0)])
+        self.assertIn("'o''brien'", sql)
+
+    def test_prune_empty_export_clears_table(self):
+        # an empty export mirrors to an empty table (no NOT IN with no values)
+        self.assertEqual(_prune_statement(self.SPEC, []),
+                         "DELETE FROM sca_leads;")
 
 
 if __name__ == "__main__":

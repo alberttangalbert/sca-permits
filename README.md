@@ -31,7 +31,10 @@ This build covers **steps 0–4** for the **Permit** module:
   prefix keeps the tables clear of the other cities'): `sca_leads` (per-permit,
   default) and `sca_lead_clusters` (deduped projects, `--clusters`). Defaults to
   generating portable SQL locally; the remote push is opt-in and uses your own
-  credentials (rows carry homeowner PII, so it never pushes without them).
+  credentials (rows carry homeowner PII, so it never pushes without them). The
+  sync is a **mirror** (`--prune`, on in the tick): leads that left the
+  actionable set — e.g. a permit that got issued/completed and dropped below the
+  threshold — are deleted from D1 rather than left behind as stale rows.
 
 ## The API (verified 2026-05-26, read-only recon)
 
@@ -134,6 +137,7 @@ python3 src/step3b_cluster.py --dry-run                      # report collapse s
 # Step 4 — sync to the shared `permits` D1 (generates SQL by default).
 python3 src/step4_sync_d1.py                                 # per-permit leads -> d1_sync.sql
 python3 src/step4_sync_d1.py --clusters                      # deduped projects -> d1_clusters_sync.sql
+python3 src/step4_sync_d1.py --prune                         # ...mirror: also delete leads that left the actionable set
 CF_ACCOUNT_ID=… CF_D1_DATABASE_ID=<shared permits D1> CF_API_TOKEN=… \
   python3 src/step4_sync_d1.py --clusters --execute          # push via D1 HTTP API (your creds)
 ```
