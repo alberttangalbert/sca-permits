@@ -1,11 +1,17 @@
 """Step 2 (parse): load cached detail JSON into sca_permit_detail + contacts.
 
-Reads every cached detail file (outputs/raw/sca/<module>_detail/<case_id>.json),
+Reads cached detail files (outputs/raw/sca/<module>_detail/<case_id>.json),
 upserts the 1:1 detail row, and replaces that record's contact rows (DELETE +
 re-INSERT, so re-parsing is idempotent and free).
 
-    python3 src/step2_parse_details.py
+    python3 src/step2_parse_details.py              # parse ALL cached files
+    python3 src/step2_parse_details.py --missing-only  # only un-parsed ones
     python3 src/step2_parse_details.py --dry-run
+
+--missing-only parses just the cached files whose detail row doesn't exist yet.
+The incremental tick uses it so a steady fire ingests only the newly-fetched
+backfill chunk instead of re-parsing the whole (growing) history every run; a
+full re-parse (after a parsing-logic change) is the default no-flag run.
 
 Outputs:
     sca_permit_detail + sca_permit_contacts rows in outputs/sca_permits.db
@@ -37,6 +43,12 @@ def parse_runs_json_for(module: str) -> Path:
     return OUTPUTS_DIR / f"parse_runs_{MODULES[module]['raw_subdir']}.json"
 
 
+def unparsed_files(all_files: list[Path], have: set[str]) -> list[Path]:
+    """Cached files whose case_id (file stem) has no detail row yet — the
+    incremental work set for --missing-only. Order is preserved."""
+    return [f for f in all_files if f.stem not in have]
+
+
 def _detail_upsert_sql() -> str:
     cols = DETAIL_COLUMNS + ["detail_parsed_at"]
     placeholders = ", ".join(f":{c}" for c in cols)
@@ -53,7 +65,8 @@ def _contact_insert_sql() -> str:
             f"VALUES ({placeholders})")
 
 
-def main(module: str, dry_run: bool, limit: int | None) -> int:
+def main(module: str, dry_run: bool, limit: int | None,
+         missing_only: bool = False) -> int:
     if module not in MODULES:
         print(f"[error] unknown module {module!r}", file=sys.stderr)
         return 2
@@ -62,15 +75,32 @@ def main(module: str, dry_run: bool, limit: int | None) -> int:
     run_id = started.strftime("%Y-%m-%d_%H%M%S")
     now_iso = started.isoformat()
     raw_dir = raw_dir_for(module)
-    files = sorted(raw_dir.glob("*.json"))
+    all_files = sorted(raw_dir.glob("*.json"))
+    files = all_files
+    if missing_only:
+        # Incremental: skip cached files already represented in sca_permit_detail
+        # so a steady tick parses only the newly-fetched chunk, not the whole
+        # (growing) history every run.
+        conn = connect()
+        try:
+            have = {r[0] for r in conn.execute(
+                "SELECT case_id FROM sca_permit_detail")}
+        finally:
+            conn.close()
+        files = unparsed_files(all_files, have)
     if limit:
         files = files[:limit]
 
     print(f"[{run_id}] module:   {module}")
-    print(f"[{run_id}] cache:    {raw_dir.relative_to(ROOT)} ({len(files)} files)")
+    print(f"[{run_id}] cache:    {raw_dir.relative_to(ROOT)} "
+          f"({len(files)} to parse / {len(all_files)} cached"
+          f"{', missing-only' if missing_only else ''})")
     if not files:
-        print("  no cached detail — run step2_fetch_details.py first.")
-        return 1
+        if not all_files:
+            print("  no cached detail — run step2_fetch_details.py first.")
+            return 1
+        print("  all cached detail already parsed (nothing new).")
+        return 0
 
     detail_rows, contact_batches = [], []
     total_contacts = 0
@@ -138,6 +168,10 @@ if __name__ == "__main__":
     p.add_argument("--module", default="Permit", choices=sorted(MODULES))
     p.add_argument("--dry-run", action="store_true",
                    help="Parse and report counts without writing to the DB.")
+    p.add_argument("--missing-only", action="store_true",
+                   help="Parse only cached files lacking a detail row (incremental; "
+                        "what the tick uses each fire).")
     p.add_argument("--limit", type=int, help="Parse only the first N cached files.")
     args = p.parse_args()
-    raise SystemExit(main(module=args.module, dry_run=args.dry_run, limit=args.limit))
+    raise SystemExit(main(module=args.module, dry_run=args.dry_run,
+                          limit=args.limit, missing_only=args.missing_only))

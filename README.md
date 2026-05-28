@@ -124,7 +124,8 @@ python3 src/step1_parse_search_results.py --module Permit
 python3 src/step2_fetch_details.py --start-year 2025          # fetch detail JSON for recent records
 python3 src/step2_fetch_details.py --start-year 2026 --limit 25   # smoke test
 python3 src/step2_fetch_details.py --all                     # full historical backfill (~52k GETs, long)
-python3 src/step2_parse_details.py                           # cached detail -> detail + contacts tables
+python3 src/step2_parse_details.py                           # parse ALL cached detail -> detail + contacts tables
+python3 src/step2_parse_details.py --missing-only            # parse only un-parsed files (incremental; what the tick uses)
 
 # Step 3 — score enriched permits into banded leads (no scraping; safe to re-run).
 python3 src/step3_score.py --rebuild                         # score everything enriched
@@ -158,7 +159,11 @@ loop incrementally, on **two cadences**:
   is missing, and a fully-throttled, fully-backfilled tick skips without even
   taking the lock.
 
-Both feed the same re-parse → re-score → re-cluster → D1-sync tail.
+Both feed the same re-parse → re-score → re-cluster → D1-sync tail. The tail's
+detail parse is incremental (`--missing-only`), so a fire ingests just the
+freshly-fetched chunk instead of re-parsing the whole (growing) cache each time;
+re-parse the full history with a manual no-flag `step2_parse_details.py` after a
+parser change.
 
 ```bash
 python3 src/tick.py --dry-run        # print the plan, touch nothing

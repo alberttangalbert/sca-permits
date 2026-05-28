@@ -25,6 +25,7 @@ from utils.step_3.scoring import (band, classify_type, pick_contacts,
 import sqlite3
 
 from step2_fetch_details import select_case_ids
+from step2_parse_details import unparsed_files
 from step4_sync_d1 import _lit, _prune_statement
 
 
@@ -345,6 +346,27 @@ class MissingDetailSelection(unittest.TestCase):
         got = select_case_ids(c, "Permit", None, None, None, None, None, 1,
                               missing_detail=True)
         self.assertEqual(got, ["p-new"])  # newest missing wins the single slot
+
+
+class UnparsedFiles(unittest.TestCase):
+    """--missing-only parse: keep only cached files whose case_id has no detail
+    row yet, preserving order — so a tick parses just the freshly-fetched chunk."""
+
+    def _files(self, *stems):
+        return [Path(f"/cache/{s}.json") for s in stems]
+
+    def test_skips_already_parsed(self):
+        files = self._files("p-new", "p-mid", "p-old")
+        got = unparsed_files(files, {"p-mid"})
+        self.assertEqual([f.stem for f in got], ["p-new", "p-old"])
+
+    def test_empty_when_all_parsed(self):
+        files = self._files("a", "b")
+        self.assertEqual(unparsed_files(files, {"a", "b"}), [])
+
+    def test_all_when_none_parsed(self):
+        files = self._files("a", "b")
+        self.assertEqual(unparsed_files(files, set()), files)
 
 
 if __name__ == "__main__":

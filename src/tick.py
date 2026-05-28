@@ -191,7 +191,7 @@ def main(args) -> int:
             print(f"  REFRESH skipped (last run {age_h:.1f}h ago < {args.min_interval_hours}h).")
         print(f"  4b. step2 backfill --missing-detail --limit {args.backfill_chunk}"
               f"   ({_missing_detail_count()} records still lack detail)")
-        print(f"  5. step2 parse")
+        print(f"  5. step2 parse --missing-only (incremental)")
         print(f"  6. step3 score --rebuild")
         print(f"  6b. step3b cluster leads -> projects")
         print(f"  7. step4 sync leads + clusters {sync_desc}")
@@ -266,10 +266,12 @@ def _run_pipeline(args, start_year, end_year, years, since, do_refresh) -> int:
              "--page-delay", str(args.detail_delay)],
             critical=False, results=results)
 
-    # 5. Parse detail -> detail + contacts.
+    # 5. Parse detail -> detail + contacts. --missing-only keeps this O(new) by
+    #    parsing just the freshly-fetched files, not the whole growing cache each
+    #    fire (a full re-parse stays a manual no-flag run after a parser change).
     run_step(
-        "step2: parse detail",
-        [str(SRC / "step2_parse_details.py"), "--module", MODULE],
+        "step2: parse detail (incremental)",
+        [str(SRC / "step2_parse_details.py"), "--module", MODULE, "--missing-only"],
         critical=False, results=results)
 
     # 6. Re-score everything (cheap; new permits + changed statuses).
