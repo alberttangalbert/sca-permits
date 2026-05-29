@@ -19,9 +19,12 @@ Two cadences in one tick:
   - The SEARCH re-pull (steps 1-4) is THROTTLED to --min-interval-hours (default
     6): it hammers the live portal and new permits trickle in slowly.
   - The historical DETAIL backfill runs EVERY fire — a polite --backfill-chunk
-    of per-record GETs for the oldest-not-yet-enriched permits — until all ~50k
-    have detail. Then it self-quiesces (nothing missing -> nothing fetched), and
-    a fully-throttled, fully-backfilled tick skips cheaply without taking the lock.
+    of per-record GETs for the oldest-not-yet-enriched permits, newest-first, down
+    to the --backfill-since floor (default 2020-01-01: the pre-2020 tail is all
+    >5y old -> recency_factor 0.1 -> never an actionable lead, so it's skipped).
+    Once everything on/after the floor has detail it self-quiesces (nothing
+    missing -> nothing fetched), and a fully-throttled, fully-backfilled tick
+    skips cheaply without taking the lock.
 
 Anonymous, read-only, single-IP — same posture as a manual run; this only
 automates the sequence. Scheduling it (cron) is the user's call; see README.
@@ -124,16 +127,22 @@ def _record_success() -> None:
     STATE_PATH.write_text(json.dumps({"last_success_at": now.isoformat()}) + "\n")
 
 
-def _missing_detail_count() -> int:
-    """Permits with no parsed detail row yet — the historical backfill remaining."""
+def _missing_detail_count(since: str | None = None) -> int:
+    """Permits with no parsed detail row yet — the historical backfill remaining.
+    `since` (ISO date) applies the same apply_date floor the backfill itself uses,
+    so the skip/quiesce logic counts only records the backfill will actually act
+    on (e.g. with a 2020 floor, the pre-2020 tail isn't counted as 'work to do')."""
     if not DB_PATH.exists():
         return 0
+    sql = ("SELECT COUNT(*) FROM sca_permits p WHERE NOT EXISTS "
+           "(SELECT 1 FROM sca_permit_detail d WHERE d.case_id = p.case_id)")
+    params: list = []
+    if since:
+        sql += " AND p.apply_date >= ?"
+        params.append(since)
     conn = connect()
     try:
-        return conn.execute(
-            "SELECT COUNT(*) FROM sca_permits p WHERE NOT EXISTS "
-            "(SELECT 1 FROM sca_permit_detail d WHERE d.case_id = p.case_id)"
-        ).fetchone()[0]
+        return conn.execute(sql, params).fetchone()[0]
     except Exception:
         return 0  # tables not created yet — a real refresh will build them
     finally:
@@ -207,8 +216,11 @@ def main(args) -> int:
             print(f"  4. step2 fetch --since {since}   (cache-skips existing -> new only)")
         else:
             print(f"  REFRESH skipped (last run {age_h:.1f}h ago < {args.min_interval_hours}h).")
-        print(f"  4b. step2 backfill --missing-detail --limit {args.backfill_chunk}"
-              f"   ({_missing_detail_count()} records still lack detail)")
+        floor = f" --since {args.backfill_since}" if args.backfill_since else ""
+        print(f"  4b. step2 backfill --missing-detail{floor} --limit {args.backfill_chunk}"
+              f"   ({_missing_detail_count(args.backfill_since)} records still lack detail"
+              + (f", apply_date >= {args.backfill_since}" if args.backfill_since else "")
+              + ")")
         print(f"  5. step2 parse --missing-only (incremental)")
         print(f"  6. step3 score --rebuild")
         print(f"  6b. step3b cluster leads -> projects")
@@ -217,8 +229,10 @@ def main(args) -> int:
         return 0
 
     # Nothing to do only when the refresh is throttled AND the backfill is done
-    # (or disabled): then we skip cheaply without even taking the lock.
-    missing = _missing_detail_count()
+    # (or disabled): then we skip cheaply without even taking the lock. The
+    # --backfill-since floor scopes "done" to the records we actually enrich
+    # (default: skip the pre-2020 archival tail — it's never an actionable lead).
+    missing = _missing_detail_count(args.backfill_since)
     if should_skip_entirely(do_refresh, args.backfill_chunk, missing):
         print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h) "
               f"and backfill complete (missing detail: {missing}); nothing to do.")
@@ -275,14 +289,20 @@ def _run_pipeline(args, start_year, end_year, years, since, do_refresh) -> int:
             critical=False, results=results)
 
     # 4b. Progressive historical backfill: enrich a chunk of the oldest-missing
-    #     records every fire (newest-first) until the whole history has detail.
+    #     records every fire (newest-first) until the history-of-interest has
+    #     detail. --backfill-since floors how far back we go (default 2020-01-01:
+    #     pre-2020 permits are all >5y old -> recency_factor 0.1 -> never an
+    #     actionable lead, so enriching them is archival-only, low value).
     if args.backfill_chunk > 0:
+        backfill_args = [str(SRC / "step2_fetch_details.py"), "--module", MODULE,
+                         "--missing-detail", "--limit", str(args.backfill_chunk),
+                         "--page-delay", str(args.detail_delay)]
+        if args.backfill_since:
+            backfill_args += ["--since", args.backfill_since]
         run_step(
-            f"step2: backfill historical detail (newest {args.backfill_chunk} missing)",
-            [str(SRC / "step2_fetch_details.py"), "--module", MODULE,
-             "--missing-detail", "--limit", str(args.backfill_chunk),
-             "--page-delay", str(args.detail_delay)],
-            critical=False, results=results)
+            f"step2: backfill historical detail (newest {args.backfill_chunk} missing"
+            + (f", since {args.backfill_since}" if args.backfill_since else "") + ")",
+            backfill_args, critical=False, results=results)
 
     # 5. Parse detail -> detail + contacts. --missing-only keeps this O(new) by
     #    parsing just the freshly-fetched files, not the whole growing cache each
@@ -344,8 +364,14 @@ if __name__ == "__main__":
     p.add_argument("--backfill-chunk", type=int, default=200,
                    help="Historical-detail records to enrich per fire (newest "
                         "missing first), separate from the throttled refresh; "
-                        "runs every tick until the ~50k history is complete. "
-                        "0 disables (default 200).")
+                        "runs every tick until the history-of-interest is "
+                        "complete. 0 disables (default 200).")
+    p.add_argument("--backfill-since", default="2020-01-01",
+                   help="Floor (ISO date) on the historical-detail backfill: only "
+                        "enrich permits applied on/after this. Default 2020-01-01 "
+                        "skips the pre-2020 archival tail (those are all >5y old -> "
+                        "recency_factor 0.1 -> never actionable leads). Pass an "
+                        "empty string to backfill the full 1999-present history.")
     p.add_argument("--skip-sync", action="store_true",
                    help="Don't run step 4 (no D1 SQL regeneration).")
     p.add_argument("--execute-sync", action="store_true",

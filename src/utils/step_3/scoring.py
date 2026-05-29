@@ -4,6 +4,7 @@ Multiplicative gates×factors model (the cu-permits architecture, re-derived for
 San Carlos's real vocabulary):
 
     lead_score = 100 · type_fit · size_factor · status_factor · contractor_factor
+                     · hold_factor · recency_factor
 
 type_fit comes from `type_fit_rules.json` (ordered substring match on case_type,
 with a description-keyword upgrade for the otherwise-uninformative misc/unknown
@@ -14,10 +15,19 @@ Carries the cu-permits audit fixes: #16 (an "agent" role never counts as a
 contractor/owner), #17 (size from a real valuation signal, not fees), #19
 (status/workflow liveness, not a hard day cutoff — done/expired score ≈ 0 by
 bucket), #20 (pending-payment statuses are near-issuance).
+
+recency_factor (added 2026-05-29) decays the score with permit age. #19 trusted
+STATUS alone for liveness, which is right for a live-from-day-one system — but
+San Carlos CSS holds MIGRATED history where pre-cutover permits froze at an
+actionable status ("Approved") and never advanced to "Finaled". Without recency,
+a 2004 approved SFR scored like a 2026 one (28% of the actionable funnel was
+>5y-old dead records). It's a soft multiplier (not a hard cutoff, in #19's
+spirit): old permits fade out of HIGH/MEDIUM rather than being deleted.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -125,6 +135,31 @@ def band(score: float) -> str:
     return "DROP"
 
 
+# Age (years since apply_date) → decay multiplier. A lead's value as NEW work
+# falls as the permit ages; this also demotes migrated records frozen at an
+# actionable status. Buckets (user-chosen 2026-05-29) are upper-inclusive.
+_RECENCY_BUCKETS = ((1.0, 1.0), (2.0, 0.8), (3.0, 0.55), (5.0, 0.3))
+_RECENCY_FLOOR = 0.1  # older than the last bucket edge
+
+
+def recency_factor(apply_date: str | None, today: dt.date | None = None) -> float:
+    """Decay multiplier from permit age. A missing/unparseable apply_date returns
+    a neutral 1.0 (never penalize a lead for a data gap); a future date (data
+    error) is treated as brand-new. Pure for testability — pass `today`."""
+    if not apply_date:
+        return 1.0
+    try:
+        applied = dt.date.fromisoformat(apply_date[:10])
+    except ValueError:
+        return 1.0
+    today = today or dt.date.today()
+    years = (today - applied).days / 365.25
+    for edge, factor in _RECENCY_BUCKETS:
+        if years <= edge:
+            return factor
+    return _RECENCY_FLOOR
+
+
 def pick_contacts(contacts: list[dict]) -> dict:
     """Choose the best owner/applicant and contractor contacts for outreach.
 
@@ -171,14 +206,16 @@ def pick_contacts(contacts: list[dict]) -> dict:
 
 def score_record(case_type, case_status, description, valuation, contacts, *,
                  additional_sqft=None, num_stories=None, construction_type=None,
-                 blocking_hold_count=0) -> dict:
+                 blocking_hold_count=0, apply_date=None, today=None) -> dict:
     """Compute the full lead row (factors + band + best contacts) for one permit.
 
     A blocking hold (active, non-expired) means the project is stuck at the city,
     so it's lightly de-prioritized (hold_factor 0.9) and flagged for the caller.
-    additional_sqft / num_stories / construction_type are carried as lead context
-    (they qualify the job on a sales call); they don't drive the score — every
-    record that has them also has a valuation, so size is already covered."""
+    apply_date drives the recency decay (stale/migrated permits fade out of the
+    actionable funnel). additional_sqft / num_stories / construction_type are
+    carried as lead context (they qualify the job on a sales call); they don't
+    drive the score — every record that has them also has a valuation, so size
+    is already covered."""
     type_fit, category = classify_type(case_type, description)
     sf = size_factor(valuation)
     stf, bucket = status_factor(case_status)
@@ -186,8 +223,9 @@ def score_record(case_type, case_status, description, valuation, contacts, *,
     contractor_factor = 0.8 if picked["has_contractor"] else 1.0
     blocking = 1 if (blocking_hold_count or 0) > 0 else 0
     hold_factor = 0.9 if blocking else 1.0
+    rf = recency_factor(apply_date, today)
 
-    score = round(100 * type_fit * sf * stf * contractor_factor * hold_factor, 1)
+    score = round(100 * type_fit * sf * stf * contractor_factor * hold_factor * rf, 1)
     return {
         "lead_score": score,
         "lead_band": band(score),
@@ -196,6 +234,7 @@ def score_record(case_type, case_status, description, valuation, contacts, *,
         "size_factor": sf,
         "status_factor": stf,
         "contractor_factor": contractor_factor,
+        "recency_factor": rf,
         "status_bucket": bucket,
         "valuation": valuation,
         "additional_sqft": additional_sqft,

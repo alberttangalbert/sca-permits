@@ -36,7 +36,7 @@ OUTPUTS_DIR = ROOT / "outputs" / "step_3"
 LEAD_COLUMNS = [
     "case_id", "lead_score", "lead_band", "category",
     "type_fit", "size_factor", "status_factor", "contractor_factor",
-    "status_bucket", "valuation", "has_contractor",
+    "recency_factor", "status_bucket", "valuation", "has_contractor",
     "owner_name", "owner_email", "owner_phone", "contractor_name",
     "additional_sqft", "num_stories", "construction_type", "blocking_hold",
 ]
@@ -65,7 +65,8 @@ def _load_permits(conn, module, since, start_year, end_year, limit):
     if since:
         where.append("p.apply_date >= ?"); params.append(since)
     sql = (f"SELECT p.case_id, p.case_type, p.case_status, p.description, d.valuation, "
-           f"d.additional_sqft, d.num_stories, d.construction_type, d.blocking_hold_count "
+           f"d.additional_sqft, d.num_stories, d.construction_type, d.blocking_hold_count, "
+           f"p.apply_date "
            f"FROM sca_permit_detail d JOIN sca_permits p USING(case_id) "
            f"WHERE {' AND '.join(where)} ORDER BY p.apply_date DESC")
     if limit:
@@ -111,13 +112,14 @@ def main(args) -> int:
 
         rows = []
         for (case_id, case_type, case_status, description, valuation,
-             additional_sqft, num_stories, construction_type, blocking_holds) in permits:
+             additional_sqft, num_stories, construction_type, blocking_holds,
+             apply_date) in permits:
             lead = score_record(
                 case_type, case_status, description, valuation,
                 contacts_by_case.get(case_id, []),
                 additional_sqft=additional_sqft, num_stories=num_stories,
                 construction_type=construction_type,
-                blocking_hold_count=blocking_holds)
+                blocking_hold_count=blocking_holds, apply_date=apply_date)
             lead["case_id"] = case_id
             rows.append(lead)
 

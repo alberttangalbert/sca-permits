@@ -21,7 +21,8 @@ from utils.step_2.parsing import (_custom_fields, _fnum, _holds_summary,
                                    normalize_role, parse_detail)
 from utils.step_3.clustering import aggregate, cluster_key
 from utils.step_3.scoring import (band, classify_type, pick_contacts,
-                                   score_record, size_factor, status_factor)
+                                   recency_factor, score_record, size_factor,
+                                   status_factor)
 import sqlite3
 
 import datetime as dt
@@ -30,6 +31,7 @@ from step2_fetch_details import select_case_ids
 from step2_parse_details import unparsed_files
 from step4_sync_d1 import _lit, _prune_statement
 from tick import should_refresh, should_skip_entirely
+from utils.step_2 import detail as detailmod
 
 
 class TypeFit(unittest.TestCase):
@@ -176,6 +178,51 @@ class ScoreRecord(unittest.TestCase):
             {"role": "CONTRACTOR", "company": "C"}]}, blocking_hold_count=1)
         self.assertEqual(withc["blocking_hold"], 1)
         self.assertAlmostEqual(withc["lead_score"], 100 * 0.8 * 0.9, places=4)
+
+    def test_recency_decays_stale_migrated_permit(self):
+        # Same approved new-SFR, scored fresh vs. 20 years stale: fresh stays HIGH,
+        # ancient frozen-status record falls out of the actionable funnel.
+        base = dict(case_type="Building Residential-New Single Family",
+                    case_status="Approved", description=None, valuation=600000,
+                    contacts=[{"role": "OWNER", "full_name": "O", "email": "o@x"}])
+        today = dt.date(2026, 5, 29)
+        fresh = score_record(**base, apply_date="2026-03-01", today=today)
+        self.assertEqual(fresh["recency_factor"], 1.0)
+        self.assertEqual(fresh["lead_band"], "HIGH")
+        stale = score_record(**base, apply_date="2004-04-01", today=today)
+        self.assertEqual(stale["recency_factor"], 0.1)
+        self.assertEqual(stale["lead_score"], 10.0)   # 100 * 0.1
+        self.assertEqual(stale["lead_band"], "LOW")   # out of HIGH/MEDIUM
+
+
+class Recency(unittest.TestCase):
+    def test_buckets_by_age(self):
+        today = dt.date(2026, 5, 29)
+        # Dates safely inside each band (edges drift ~a day with leap years, which
+        # is immaterial; we assert the band a clearly-aged permit lands in).
+        self.assertEqual(recency_factor("2025-11-29", today), 1.0)   # ~0.5y
+        self.assertEqual(recency_factor("2024-11-29", today), 0.8)   # ~1.5y
+        self.assertEqual(recency_factor("2023-11-29", today), 0.55)  # ~2.5y
+        self.assertEqual(recency_factor("2022-05-29", today), 0.3)   # ~4y
+        self.assertEqual(recency_factor("2016-05-29", today), 0.1)   # ~10y
+
+    def test_monotonic_non_increasing_with_age(self):
+        today = dt.date(2026, 5, 29)
+        ages = ["2026-05-01", "2024-11-29", "2023-11-29", "2022-05-29", "2010-01-01"]
+        facs = [recency_factor(a, today) for a in ages]
+        self.assertEqual(facs, sorted(facs, reverse=True))  # never increases with age
+
+    def test_missing_or_bad_date_is_neutral(self):
+        self.assertEqual(recency_factor(None), 1.0)
+        self.assertEqual(recency_factor(""), 1.0)
+        self.assertEqual(recency_factor("not-a-date"), 1.0)
+
+    def test_future_date_treated_as_fresh(self):
+        self.assertEqual(recency_factor("2027-01-01", dt.date(2026, 5, 29)), 1.0)
+
+    def test_accepts_datetime_prefix(self):
+        # apply_date in the DB is an ISO datetime; only the date head matters
+        self.assertEqual(recency_factor("2004-04-01T00:00:00", dt.date(2026, 5, 29)), 0.1)
 
 
 class Clustering(unittest.TestCase):
@@ -357,6 +404,72 @@ class MissingDetailSelection(unittest.TestCase):
         got = select_case_ids(c, "Permit", None, None, None, None, None, 1,
                               missing_detail=True)
         self.assertEqual(got, ["p-new"])  # newest missing wins the single slot
+
+    def test_since_floor_skips_pre_cutoff_missing(self):
+        # The --backfill-since floor: a pre-2020 missing record is excluded even
+        # though it lacks detail (the tick's default skips the archival tail).
+        c = self._db()
+        c.execute("INSERT INTO sca_permits VALUES "
+                  "('p-1999','Permit','1999-05-01T00:00:00','Approved','X')")
+        c.commit()
+        got = select_case_ids(c, "Permit", None, None, "2020-01-01", None, None,
+                              None, missing_detail=True)
+        self.assertEqual(got, ["p-new", "p-old"])  # p-1999 below floor -> excluded
+
+
+class _FakeResp:
+    def __init__(self, status, payload=None, text=""):
+        self.status_code = status
+        self._payload = payload if payload is not None else {}
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    """Returns a scripted sequence of responses, one per .get() call."""
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def get(self, url, timeout=None):
+        self.calls += 1
+        return self._responses.pop(0)
+
+
+class DetailFetchRetry(unittest.TestCase):
+    """fetch_one rides through a TRANSIENT 401 (anonymous endpoint, server blip)
+    via backoff, but still gives up on a genuinely non-retryable status."""
+
+    def setUp(self):
+        self._sleep = detailmod.time.sleep
+        detailmod.time.sleep = lambda *_: None      # no real backoff in tests
+
+    def tearDown(self):
+        detailmod.time.sleep = self._sleep
+
+    def test_transient_401_then_200_succeeds(self):
+        sess = _FakeSession([
+            _FakeResp(401, text="Authorization has been denied"),
+            _FakeResp(200, {"Success": True, "Result": {"ok": 1}}),
+        ])
+        result = detailmod.fetch_one(sess, "case-x")
+        self.assertEqual(result, {"ok": 1})
+        self.assertEqual(sess.calls, 2)             # retried once, then succeeded
+
+    def test_404_is_not_retried(self):
+        sess = _FakeSession([_FakeResp(404, text="not found")])
+        with self.assertRaises(detailmod.DetailError):
+            detailmod.fetch_one(sess, "case-y")
+        self.assertEqual(sess.calls, 1)             # hard error -> no retry
+
+    def test_persistent_401_eventually_raises(self):
+        sess = _FakeSession([_FakeResp(401, text="denied")
+                             for _ in range(detailmod.MAX_RETRIES + 1)])
+        with self.assertRaises(detailmod.DetailError):
+            detailmod.fetch_one(sess, "case-z")
+        self.assertEqual(sess.calls, detailmod.MAX_RETRIES + 1)  # bounded, no infinite loop
 
 
 class UnparsedFiles(unittest.TestCase):

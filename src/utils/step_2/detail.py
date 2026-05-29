@@ -28,7 +28,14 @@ class DetailError(RuntimeError):
     """Non-retryable detail failure (404, persistent 5xx, bad body)."""
 
 
-RETRY_STATUS = {429, 503}   # transient — back off and retry
+# 401 here is a TRANSIENT server blip, not an auth requirement: the detail GET is
+# anonymous, and on 2026-05-29 four consecutive records returned 401
+# ("Authorization has been denied for this request.") mid-backfill yet returned
+# 200 on an immediate re-GET. Retrying the SAME anonymous request rides through
+# the blip — it never adds credentials (we stay anonymous-only). A record that is
+# genuinely restricted would still 401 through all retries and be recorded as an
+# error, so this can't loop forever.
+RETRY_STATUS = {401, 429, 503}   # transient — back off and retry
 MAX_RETRIES = 4
 BACKOFF_BASE = 1.0          # seconds: 1, 2, 4, 8
 

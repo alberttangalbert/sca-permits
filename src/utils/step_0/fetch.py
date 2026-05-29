@@ -33,7 +33,14 @@ class SearchError(RuntimeError):
     """Non-retryable search failure (bad body, persistent 5xx, etc.)."""
 
 
-RETRY_STATUS = {429, 503}        # transient — back off and retry
+# 401 is a transient server blip, not an auth requirement: this search is
+# anonymous (the SPA's own public call), and EnerGov intermittently returns 401
+# "Authorization has been denied" under load even on records/queries it serves
+# anonymously a moment later (confirmed against detail GETs 2026-05-29). Retrying
+# the SAME anonymous request rides through it — no credentials are ever added.
+# Critical here: a transient 401 on a search page would otherwise abort the whole
+# (critical) refresh; this lets the existing backoff absorb it instead.
+RETRY_STATUS = {401, 429, 503}   # transient — back off and retry
 MAX_RETRIES = 4
 BACKOFF_BASE = 1.0               # seconds: 1, 2, 4, 8
 RESULT_WINDOW_CAP = 10000        # Elasticsearch index.max_result_window
