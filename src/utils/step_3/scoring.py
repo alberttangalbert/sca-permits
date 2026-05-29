@@ -333,6 +333,11 @@ def score_record(case_type, case_status, description, valuation, contacts, *,
     rf = recency_factor(apply_date, today)
 
     score = round(100 * type_fit * sf * stf * contractor_factor * hold_factor * rf, 1)
+    # Negative or zero valuations are EnerGov source-data errors (3 records on
+    # 2026-05-29: water-heater permits with valuation -$11 / -$9 / -$1). size_factor
+    # already treats <=0 as neutral; null the field on the lead row too so D1
+    # and downstream readers don't see misleading negative dollar amounts.
+    clean_valuation = valuation if (valuation and valuation > 0) else None
     return {
         "lead_score": score,
         "lead_band": band(score),
@@ -343,7 +348,7 @@ def score_record(case_type, case_status, description, valuation, contacts, *,
         "contractor_factor": contractor_factor,
         "recency_factor": rf,
         "status_bucket": bucket,
-        "valuation": valuation,
+        "valuation": clean_valuation,
         "additional_sqft": additional_sqft,
         "num_stories": num_stories,
         "construction_type": construction_type,

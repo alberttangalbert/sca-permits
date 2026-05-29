@@ -130,6 +130,20 @@ class Factors(unittest.TestCase):
         self.assertEqual(scored["status_bucket"], "DEAD")
         self.assertEqual(scored["lead_band"], "DROP")
 
+    def test_negative_valuation_stored_as_null(self):
+        # EnerGov has 3 records with valuation < 0 (data-entry typos on small
+        # 2020 sub-trade permits). size_factor already treats them as neutral;
+        # the lead row should also NULL them out so D1 doesn't show "-$9".
+        scored = score_record(
+            case_type="Water Heater", case_status="Finaled",
+            description="water heater replacement", valuation=-9.0, contacts=[])
+        self.assertIsNone(scored["valuation"])
+        # And zero stays neutral but also NULL'd on the row (consistency).
+        scored = score_record(
+            case_type="Plumbing", case_status="Issued",
+            description="x", valuation=0.0, contacts=[])
+        self.assertIsNone(scored["valuation"])
+
     def test_description_void_does_not_override_complete(self):
         # If a permit ALREADY completed (Finaled), a void-looking description
         # is just historical -- don't override the COMPLETE bucket. The 0.05
