@@ -86,6 +86,15 @@ COUNT_CHECKS = [
      "AND ((owner_email IS NOT NULL AND owner_email != '') "
      "  OR (owner_phone IS NOT NULL AND owner_phone != '') "
      "  OR (owner_name IS NOT NULL AND owner_name != ''))"),
+    # Same invariant on the cluster export — aggregate() must propagate the
+    # role of the picked contact MEMBER. Without this, a refactor that
+    # forgets to wire contact_role through clustering would silently strip
+    # the (Architect)/(Designer) labels from the GC's project call list.
+    ("FAIL", "clusters: contact_role set whenever a contact is surfaced",
+     "SELECT COUNT(*) FROM sca_lead_clusters WHERE contact_role IS NULL "
+     "AND ((owner_email IS NOT NULL AND owner_email != '') "
+     "  OR (owner_phone IS NOT NULL AND owner_phone != '') "
+     "  OR (owner_name IS NOT NULL AND owner_name != ''))"),
     # cluster_id format must agree with cluster_key_type: PARCEL -> "P:<...>",
     # ADDRESS -> "A:<...>", SINGLETON -> "C:<...>" (the prefixes are how the
     # D1 prune step distinguishes them and how the cluster spec maps to the
