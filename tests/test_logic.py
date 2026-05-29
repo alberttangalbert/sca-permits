@@ -130,11 +130,11 @@ class Contacts(unittest.TestCase):
     def test_prefers_owner_with_contact_and_flags_contractor(self):
         contacts = [
             {"role": "OWNER", "full_name": "Jane Doe", "company": None,
-             "email": "jane@x.com", "phone": "555-1"},
+             "email": "jane@x.com", "phone": "555-1234567"},
             {"role": "APPLICANT", "full_name": "Appy", "company": None,
              "email": None, "phone": None},
             {"role": "CONTRACTOR", "full_name": "Bob", "company": "BuildCo",
-             "email": None, "phone": "555-2"},
+             "email": None, "phone": "555-7654321"},
         ]
         picked = pick_contacts(contacts)
         self.assertEqual(picked["owner_name"], "Jane Doe")
@@ -157,18 +157,18 @@ class Contacts(unittest.TestCase):
             {"role": "OWNER", "full_name": "Nameonly Owner", "email": None,
              "phone": None},
             {"role": "APPLICANT", "full_name": "Reachable App", "email": None,
-             "phone": "555-9"}])
-        self.assertEqual(picked["owner_phone"], "555-9")
+             "phone": "555-1234567"}])
+        self.assertEqual(picked["owner_phone"], "555-1234567")
         self.assertEqual(picked["owner_name"], "Reachable App")
 
     def test_reachable_owner_still_wins_over_applicant(self):
         # When the owner IS reachable, keep preferring the owner.
         picked = pick_contacts([
-            {"role": "OWNER", "full_name": "Owner", "email": "o@x", "phone": None},
-            {"role": "APPLICANT", "full_name": "App", "email": "a@x",
-             "phone": "555-1"}])
+            {"role": "OWNER", "full_name": "Owner", "email": "o@x.com", "phone": None},
+            {"role": "APPLICANT", "full_name": "App", "email": "a@x.com",
+             "phone": "555-1234567"}])
         self.assertEqual(picked["owner_name"], "Owner")
-        self.assertEqual(picked["owner_email"], "o@x")
+        self.assertEqual(picked["owner_email"], "o@x.com")
 
     def test_void_void_placeholder_does_not_surface_as_owner(self):
         # EnerGov's redacted-applicant marker: it has no real identity, so it
@@ -176,10 +176,10 @@ class Contacts(unittest.TestCase):
         picked = pick_contacts([
             {"role": "APPLICANT", "full_name": "void void", "email": None,
              "phone": None},
-            {"role": "OWNER", "full_name": "Real Owner", "email": "r@x",
-             "phone": "555-r"}])
+            {"role": "OWNER", "full_name": "Real Owner", "email": "r@x.com",
+             "phone": "555-1234567"}])
         self.assertEqual(picked["owner_name"], "Real Owner")
-        self.assertEqual(picked["owner_email"], "r@x")
+        self.assertEqual(picked["owner_email"], "r@x.com")
 
     def test_void_void_only_contact_yields_unreachable_lead(self):
         # When the ONLY candidate is a placeholder, the lead is correctly
@@ -210,10 +210,10 @@ class Contacts(unittest.TestCase):
         # Order: OWNER -> APPLICANT -> ARCHITECT -> DESIGNER -> ENGINEER -> AGENT.
         # Agent only wins when no higher-tier reachable contact is available.
         picked = pick_contacts([
-            {"role": "AGENT", "full_name": "Agent A", "email": "a@x", "phone": None},
-            {"role": "ARCHITECT", "full_name": "Arch A", "email": "arc@x", "phone": None}])
+            {"role": "AGENT", "full_name": "Agent A", "email": "a@x.com", "phone": None},
+            {"role": "ARCHITECT", "full_name": "Arch A", "email": "arc@x.com", "phone": None}])
         self.assertEqual(picked["contact_role"], "ARCHITECT")
-        self.assertEqual(picked["owner_email"], "arc@x")
+        self.assertEqual(picked["owner_email"], "arc@x.com")
 
     def test_designer_recovers_unreachable_owner(self):
         # Real-world case (BLD2024-00925): residential ADDITION with contactless
@@ -233,8 +233,47 @@ class Contacts(unittest.TestCase):
             {"role": "DESIGNER", "full_name": "Named Designer", "email": None,
              "phone": None},
             {"role": "ENGINEER", "full_name": "Reachable Engineer",
-             "email": "e@x", "phone": None}])
+             "email": "e@x.com", "phone": None}])
         self.assertEqual(picked["contact_role"], "ENGINEER")
+
+    def test_garbage_email_does_not_beat_real_phone(self):
+        # Real-world case: an OWNER row has a typo email like 'a@b@c.com' (two
+        # @'s) and no phone, while a DESIGNER row has a real phone. Without
+        # validation, the OWNER would win the ranking on (email=True, ...)
+        # despite the email being unusable, and the lead would surface as
+        # "reachable" via a garbage address. After the fix, garbage email is
+        # treated as missing and the DESIGNER's real phone wins.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "Typo Owner",
+             "email": "a@b@c.com", "phone": None},
+            {"role": "DESIGNER", "full_name": "Real Designer",
+             "email": None, "phone": "555-1234567"}])
+        self.assertEqual(picked["contact_role"], "DESIGNER")
+        self.assertIsNone(picked["owner_email"])
+        self.assertEqual(picked["owner_phone"], "555-1234567")
+
+    def test_short_phone_is_dropped(self):
+        # 7-digit "phones" (missing area code) and shorter junk are not
+        # reachable for systematic outreach -- treat them as missing.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "Local-only", "email": None,
+             "phone": "555-1234"},
+            {"role": "APPLICANT", "full_name": "Reachable",
+             "email": "a@b.com", "phone": "(650) 555-1234"}])
+        self.assertEqual(picked["contact_role"], "APPLICANT")
+        self.assertEqual(picked["owner_email"], "a@b.com")
+
+    def test_phone_in_email_field_doesnt_count_as_email(self):
+        # EnerGov sometimes has '5302210761' in the email field (data entry
+        # bug). Strict validation rejects it as an email, so the architect
+        # wins on real reachability and the bogus 'email' never gets surfaced.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "Bad Data",
+             "email": "5302210761", "phone": None},
+            {"role": "ARCHITECT", "full_name": "Real Architect",
+             "email": "arc@x.com", "phone": "555-1234567"}])
+        self.assertEqual(picked["contact_role"], "ARCHITECT")
+        self.assertEqual(picked["owner_email"], "arc@x.com")
 
     def test_contact_role_is_owner_when_owner_reachable(self):
         # When the owner is genuinely reachable, contact_role labels it OWNER --

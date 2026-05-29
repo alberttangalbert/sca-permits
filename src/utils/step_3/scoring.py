@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from pathlib import Path
 
 _RULES_PATH = Path(__file__).with_name("type_fit_rules.json")
@@ -177,6 +178,37 @@ def _is_placeholder(c: dict) -> bool:
     return name in _PLACEHOLDER_NAMES
 
 
+# Source-data hygiene helpers (added 2026-05-29). EnerGov contact rows
+# sometimes put a phone in the email field, or an email with two @'s, or a
+# 7-digit "phone" that's missing the area code. Treating those as reachable
+# in the candidate ranking lets garbage beat a valid lower-tier contact AND
+# pushes unusable data to D1. These validators are intentionally strict
+# (require @ + a dot, require 10 digits) so only clearly-usable info counts.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _email_usable(s: str | None) -> bool:
+    return bool(s) and bool(_EMAIL_RE.match(s.strip()))
+
+
+def _phone_usable(s: str | None) -> bool:
+    if not s:
+        return False
+    digits = re.sub(r"\D", "", s)
+    # 10 = US local + area code; 11 = with country prefix; up to 15 = E.164.
+    return 10 <= len(digits) <= 15
+
+
+def _usable_contact(c: dict) -> dict:
+    """Return a view of the contact with unusable email/phone NULL'd out, so
+    'IGOR@SLUTSKER@GMAIL.COM' or a 7-digit 'phone' can't beat a real entry."""
+    return {
+        **c,
+        "email": c.get("email") if _email_usable(c.get("email")) else None,
+        "phone": c.get("phone") if _phone_usable(c.get("phone")) else None,
+    }
+
+
 def pick_contacts(contacts: list[dict]) -> dict:
     """Choose the best outreach contact for a lead (and the contractor signal).
 
@@ -208,7 +240,11 @@ def pick_contacts(contacts: list[dict]) -> dict:
     are dropped from BOTH pools so they never surface as a lead contact and
     'BUILDER OWNER' (owner-builder stamp) never falsely triggers the
     contractor-attached penalty."""
-    real = [c for c in contacts if not _is_placeholder(c)]
+    # Two cleanups before ranking: drop placeholder identities entirely
+    # ('void void', 'BUILDER OWNER'), and NULL-out clearly-unusable email/
+    # phone values so a typo email or a 5-digit "phone" can't beat a real
+    # lower-tier contact in the reachability sort.
+    real = [_usable_contact(c) for c in contacts if not _is_placeholder(c)]
     fallback_order = ("OWNER", "APPLICANT", "ARCHITECT", "DESIGNER",
                       "ENGINEER", "AGENT")
     by_role = {role: [c for c in real if c.get("role") == role]
