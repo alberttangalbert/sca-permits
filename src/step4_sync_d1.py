@@ -21,6 +21,12 @@ Emitted as portable SQL. Modes:
 By default only actionable bands (HIGH/MEDIUM/LOW) are pushed; DROP noise stays
 local. Use --all to include everything, --band to pick bands.
 
+Pre-2020 permits are excluded by default (--since 2020-01-01). The recency_factor
+0.1 floor isn't quite enough on its own — a handful of pre-2020 "Approved"
+zombies (work long done) still squeak past band LOW (score 7-9). This matches
+the tick's --backfill-since 2020-01-01 floor so the export and the enrichment
+agree on the same horizon. Pass --since "" to publish the full archival history.
+
 The upsert never deletes, so a lead that LEAVES the actionable set (e.g. a permit
 gets issued/completed -> its score drops to band DROP) would linger forever in
 D1 as a stale "actionable" row. Pass --prune to append a mirror-delete that makes
@@ -77,6 +83,7 @@ SELECT l.case_id, p.case_number, l.lead_score, l.lead_band, l.category,
 FROM sca_leads l JOIN sca_permits p USING(case_id)
 """,
     "band_col": "l.lead_band",
+    "date_col": "p.apply_date",
     "order_by": "l.lead_score DESC",
     "indexes": [("band", "lead_band"), ("score", "lead_score")],
 }
@@ -105,6 +112,9 @@ SELECT cluster_id, key_type, permit_count, max_lead_score, top_band, categories,
 FROM sca_lead_clusters
 """,
     "band_col": "top_band",
+    # Cluster is kept if its MOST RECENT permit is post-cutoff — a cluster with
+    # any live activity in-window is in-scope even if older permits drag back.
+    "date_col": "last_apply_date",
     "order_by": "max_lead_score DESC",
     "indexes": [("band", "top_band"), ("score", "max_lead_score")],
 }
@@ -129,11 +139,17 @@ def _lit(v) -> str:
     return "'" + str(v).replace("'", "''") + "'"
 
 
-def _fetch_rows(conn, spec, bands, limit):
+def _fetch_rows(conn, spec, bands, since, limit):
     where, params = [], []
     if bands:
         where.append(f"{spec['band_col']} IN ({', '.join('?' for _ in bands)})")
         params += bands
+    if since:
+        # Treat NULL/empty apply_date as IN-scope: a known-current permit that
+        # happens to be missing apply_date should NOT be silently filtered out.
+        # Pre-2020 zombies all HAVE apply_date, so this floor still excludes them.
+        where.append(f"({spec['date_col']} IS NULL OR {spec['date_col']} >= ?)")
+        params.append(since)
     sql = spec["select"] + (f"WHERE {' AND '.join(where)} " if where else "")
     sql += "ORDER BY " + spec["order_by"]
     if limit:
@@ -208,7 +224,7 @@ def main(args) -> int:
 
     conn = connect()
     try:
-        rows = _fetch_rows(conn, spec, bands, args.limit)
+        rows = _fetch_rows(conn, spec, bands, args.since or None, args.limit)
     finally:
         conn.close()
 
@@ -218,8 +234,8 @@ def main(args) -> int:
     schema_path = OUTPUTS_DIR / spec["schema_file"]
     sync_path = OUTPUTS_DIR / spec["sync_file"]
     print(f"[step4] {spec['name']}: export rows {len(rows)}  "
-          f"(bands={bands or 'ALL'})  batches={len(inserts)}"
-          f"{'  +prune' if prune else ''}")
+          f"(bands={bands or 'ALL'}, since={args.since or 'ALL'})  "
+          f"batches={len(inserts)}{'  +prune' if prune else ''}")
 
     schema_path.write_text(schema)
     sync_path.write_text(("\n".join(body) + "\n") if body else "")
@@ -251,6 +267,11 @@ if __name__ == "__main__":
     p.add_argument("--all", action="store_true",
                    help="Include DROP-band rows too (default: HIGH/MEDIUM/LOW only).")
     p.add_argument("--band", help="Comma-separated bands to export (e.g. 'HIGH,MEDIUM').")
+    p.add_argument("--since", default="2020-01-01",
+                   help="Floor on apply_date (leads) / last_apply_date (clusters). "
+                        "Default 2020-01-01 matches the tick backfill horizon and "
+                        "kills the 9 pre-2020 'Approved' zombie LOW leads. "
+                        "Pass --since '' to publish the full archival history.")
     p.add_argument("--limit", type=int, help="Cap exported rows.")
     p.add_argument("--prune", action="store_true",
                    help="Append a DELETE so D1 mirrors exactly this export "

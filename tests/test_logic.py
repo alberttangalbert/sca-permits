@@ -29,7 +29,7 @@ import datetime as dt
 
 from step2_fetch_details import select_case_ids
 from step2_parse_details import unparsed_files
-from step4_sync_d1 import _lit, _prune_statement
+from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUSTERS_SPEC
 from tick import should_refresh, should_skip_entirely
 from utils.step_2 import detail as detailmod
 
@@ -371,6 +371,73 @@ class PruneStatement(unittest.TestCase):
         # an empty export mirrors to an empty table (no NOT IN with no values)
         self.assertEqual(_prune_statement(self.SPEC, []),
                          "DELETE FROM sca_leads;")
+
+
+class ExportSinceFloor(unittest.TestCase):
+    """The --since export floor: pre-2020 'Approved' zombies (recency_factor 0.1
+    isn't quite enough to push them out of band LOW) get filtered at export.
+    Matches the tick's --backfill-since horizon so we don't enrich what we don't
+    publish. NULL apply_date stays IN-scope (don't silently lose live records
+    with missing apply_date due to a portal quirk)."""
+
+    def _db(self):
+        c = sqlite3.connect(":memory:")
+        c.executescript("""
+            CREATE TABLE sca_permits (case_id TEXT PRIMARY KEY, case_number TEXT,
+                case_status TEXT, address_display TEXT, main_parcel TEXT,
+                apply_date TEXT, issue_date TEXT, description TEXT);
+            CREATE TABLE sca_leads (case_id TEXT PRIMARY KEY, lead_score REAL,
+                lead_band TEXT, category TEXT, status_bucket TEXT, valuation REAL,
+                additional_sqft REAL, num_stories REAL, construction_type TEXT,
+                blocking_hold INTEGER, has_contractor INTEGER, owner_name TEXT,
+                owner_email TEXT, owner_phone TEXT, contractor_name TEXT,
+                scored_at TEXT, cluster_id TEXT, cluster_key_type TEXT);
+            CREATE TABLE sca_lead_clusters (cluster_id TEXT PRIMARY KEY,
+                key_type TEXT, permit_count INTEGER, max_lead_score REAL,
+                top_band TEXT, categories TEXT, total_valuation REAL,
+                max_valuation REAL, primary_case_id TEXT, address_display TEXT,
+                main_parcel TEXT, owner_name TEXT, owner_email TEXT,
+                owner_phone TEXT, has_contractor INTEGER,
+                first_apply_date TEXT, last_apply_date TEXT);
+        """)
+        # 3 permits: pre-cutoff zombie, post-cutoff live, NULL-date oddball.
+        c.executemany("INSERT INTO sca_permits VALUES (?,?,?,?,?,?,?,?)", [
+            ("z-old", "BLD2008-1", "Approved", "1 OLD ST", "p1",
+             "2008-06-11T00:00:00", "2008-10-03", "old"),
+            ("y-new", "BLD2025-1", "Issued", "2 NEW ST", "p2",
+             "2025-03-01T00:00:00", None, "new"),
+            ("x-null", "BLD2024-1", "In Review", "3 X ST", "p3",
+             None, None, "nulldate"),
+        ])
+        c.executemany(
+            "INSERT INTO sca_leads (case_id, lead_score, lead_band) VALUES (?,?,?)",
+            [("z-old", 8.0, "LOW"), ("y-new", 60.0, "HIGH"), ("x-null", 30.0, "MEDIUM")])
+        c.commit()
+        return c
+
+    def test_leads_since_floor_drops_pre_cutoff(self):
+        c = self._db()
+        rows = _fetch_rows(c, LEADS_SPEC, ["HIGH", "MEDIUM", "LOW"], "2020-01-01", None)
+        case_ids = {r[0] for r in rows}
+        self.assertEqual(case_ids, {"y-new", "x-null"})  # z-old excluded; NULL stays
+
+    def test_leads_no_since_includes_all_bands(self):
+        c = self._db()
+        rows = _fetch_rows(c, LEADS_SPEC, ["HIGH", "MEDIUM", "LOW"], None, None)
+        self.assertEqual({r[0] for r in rows}, {"z-old", "y-new", "x-null"})
+
+    def test_clusters_since_floor_uses_last_apply_date(self):
+        c = self._db()
+        c.executemany("INSERT INTO sca_lead_clusters (cluster_id, top_band, "
+                      "first_apply_date, last_apply_date) VALUES (?,?,?,?)", [
+            ("c-zombie", "LOW", "2008-06-11", "2008-10-03"),       # all pre-cutoff
+            ("c-mixed",  "HIGH", "2008-06-11", "2024-05-01"),       # newest in-scope
+            ("c-null",   "MEDIUM", None, None),                     # NULL stays
+        ])
+        c.commit()
+        rows = _fetch_rows(c, CLUSTERS_SPEC, ["HIGH", "MEDIUM", "LOW"], "2020-01-01", None)
+        ids = {r[0] for r in rows}
+        self.assertEqual(ids, {"c-mixed", "c-null"})  # c-zombie excluded
 
 
 class MissingDetailSelection(unittest.TestCase):
