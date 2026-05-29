@@ -26,9 +26,21 @@ _CITY_TAIL = re.compile(
     r"(\s*,?\s*9\d{4}(-\d{4})?)?$",
     re.IGNORECASE)
 _TRAILING_STAR = re.compile(r"\s*\*+\s*$")
-# Unit qualifier: ", G" / ", 29" / ", #5" / ", APT B" — short trailing token.
+# EnerGov's primary unit pattern: "<street> Unit: <unit text>". The unit text
+# runs to end-of-string and may be longer than the comma-form (e.g. 'APT # 304').
+# Detected 2026-05-29: 3,594 of 3,616 'Unit:' addresses were missing extraction
+# because they don't use the comma-form. Convert to the comma-form BEFORE the
+# comma-based extractor runs, so both pipelines yield the same (norm, unit).
+_ENERGOV_UNIT = re.compile(r"\s+UNIT\s*:\s*", re.IGNORECASE)
+# Comma-form unit qualifier: ", G" / ", 29" / ", #5" / ", APT B" / ", APT # 304"
+# / ", SUITE B" / ", APT. 2" / ", C & D" / ", # H & J-K". The content runs to
+# end of string and preserves the marker word so "APT # 304" stays "APT # 304"
+# (vs. just "304"), since the marker is part of the canonical unit label. The
+# pattern requires at least one alphanumeric/# character so an empty ", "
+# doesn't false-match. '&' is included because multi-unit commercial spaces
+# at the same address use it ("C & D") and ~50 SC addresses follow that form.
 _UNIT_TAIL = re.compile(
-    r",\s*((unit|apt|suite|ste|#)\s*)?[\w\d#]{1,5}\s*$",
+    r",\s*([\w#][\w#./\-& ]*?)\s*$",
     re.IGNORECASE)
 
 
@@ -56,10 +68,12 @@ def split_address(raw: str | None) -> tuple[str, str]:
     s = str(raw).strip().upper()
     s = _TRAILING_STAR.sub("", s)
     s = _CITY_TAIL.sub("", s).strip().strip(",").strip()
+    # EnerGov's "Unit:" separator -> comma-form, so one extractor handles both.
+    s = _ENERGOV_UNIT.sub(", ", s)
     unit = ""
     m = _UNIT_TAIL.search(s)
     if m:
-        unit = _WHITESPACE.sub(" ", m.group(0).lstrip(", ").strip()).strip()
+        unit = _WHITESPACE.sub(" ", m.group(1).strip()).strip()
         s = s[:m.start()].strip().strip(",").strip()
     s = _WHITESPACE.sub(" ", s)
     return s, unit

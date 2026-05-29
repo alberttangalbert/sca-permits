@@ -355,6 +355,35 @@ class AddressNormalization(unittest.TestCase):
         # A trailing "*" (an Accela-era flag; absent from SC data) is stripped.
         self.assertEqual(split_address("123 MAIN ST *"), ("123 MAIN ST", ""))
 
+    def test_energov_unit_separator(self):
+        # EnerGov's primary multifamily address format uses "Unit:" with no
+        # comma — found 3,594 of 3,616 such records were missing extraction
+        # before the fix. The base address must clean up (no leaked "UNIT:")
+        # and the unit must populate.
+        self.assertEqual(
+            split_address("1500 LAUREL ST Unit: SUITE B"),
+            ("1500 LAUREL ST", "SUITE B"))
+        self.assertEqual(
+            split_address("1263 CHERRY ST Unit: APT # 304 SAN CARLOS CA 94070"),
+            ("1263 CHERRY ST", "APT # 304"))
+        self.assertEqual(
+            split_address("907 E. SAN CARLOS AVE Unit: UNIT 6"),
+            ("907 E. SAN CARLOS AVE", "UNIT 6"))
+        self.assertEqual(
+            split_address("1000 COMMERCIAL ST Unit: UNIT C"),
+            ("1000 COMMERCIAL ST", "UNIT C"))
+
+    def test_preserves_marker_in_unit(self):
+        # The marker (APT/SUITE/UNIT/#) is canonical context for the unit -- it
+        # qualifies how the unit number is referred to and should stay attached.
+        # Previously the regex stripped it, so "APT 29" became just "29".
+        self.assertEqual(
+            split_address("648 WALNUT ST Unit: APT #2"),
+            ("648 WALNUT ST", "APT #2"))
+        self.assertEqual(
+            split_address("25 DEVONSHIRE BLVD Unit: APT. 2"),
+            ("25 DEVONSHIRE BLVD", "APT. 2"))
+
 
 class Step1Parsing(unittest.TestCase):
     def test_parse_page_skips_entities_without_caseid(self):
