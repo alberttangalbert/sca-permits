@@ -106,14 +106,15 @@ CLUSTERS_SPEC = {
         ("primary_case_id", "TEXT"), ("address_display", "TEXT"),
         ("main_parcel", "TEXT"), ("owner_name", "TEXT"),
         ("owner_email", "TEXT"), ("owner_phone", "TEXT"),
+        ("contact_role", "TEXT"),
         ("has_contractor", "INTEGER"), ("first_apply_date", "TEXT"),
         ("last_apply_date", "TEXT"),
     ],
     "select": """
 SELECT cluster_id, key_type, permit_count, max_lead_score, top_band, categories,
        total_valuation, max_valuation, primary_case_id, address_display,
-       main_parcel, owner_name, owner_email, owner_phone, has_contractor,
-       first_apply_date, last_apply_date
+       main_parcel, owner_name, owner_email, owner_phone, contact_role,
+       has_contractor, first_apply_date, last_apply_date
 FROM sca_lead_clusters
 """,
     "band_col": "top_band",

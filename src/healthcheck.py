@@ -77,6 +77,15 @@ COUNT_CHECKS = [
      "SELECT COUNT(*) FROM sca_leads WHERE lead_band IN ('HIGH','MEDIUM') "
      "AND (owner_email IS NULL OR owner_email='') "
      "AND (owner_phone IS NULL OR owner_phone='')"),
+    # Invariant: any lead with surfaced owner contact info MUST have a
+    # contact_role labeling its provenance — otherwise the UI can't honestly
+    # render "Name (Role)" and would silently default to "Owner" on what may
+    # be an architect/agent. FAIL because this is a wiring bug, not data drift.
+    ("FAIL", "leads: contact_role set whenever a contact is surfaced",
+     "SELECT COUNT(*) FROM sca_leads WHERE contact_role IS NULL "
+     "AND ((owner_email IS NOT NULL AND owner_email != '') "
+     "  OR (owner_phone IS NOT NULL AND owner_phone != '') "
+     "  OR (owner_name IS NOT NULL AND owner_name != ''))"),
 ]
 
 

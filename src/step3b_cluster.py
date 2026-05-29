@@ -34,7 +34,7 @@ CLUSTER_COLUMNS = [
     "cluster_id", "key_type", "permit_count", "max_lead_score", "top_band",
     "categories", "total_valuation", "max_valuation", "primary_case_id",
     "address_display", "main_parcel", "owner_name", "owner_email", "owner_phone",
-    "has_contractor", "first_apply_date", "last_apply_date",
+    "contact_role", "has_contractor", "first_apply_date", "last_apply_date",
 ]
 
 
@@ -57,7 +57,8 @@ def main(args) -> int:
     try:
         rows = conn.execute(
             "SELECT l.case_id, l.lead_score, l.lead_band, l.category, l.valuation, "
-            "l.owner_name, l.owner_email, l.owner_phone, l.has_contractor, "
+            "l.owner_name, l.owner_email, l.owner_phone, l.contact_role, "
+            "l.has_contractor, "
             "p.address_display, p.main_parcel, p.address_norm, p.apply_date "
             "FROM sca_leads l JOIN sca_permits p USING(case_id)").fetchall()
 
@@ -65,13 +66,14 @@ def main(args) -> int:
         key_for_case: list[tuple[str, str, str]] = []
         for r in rows:
             (case_id, score, band, category, valuation, o_name, o_email, o_phone,
-             has_c, addr, parcel, addr_norm, apply_date) = r
+             contact_role, has_c, addr, parcel, addr_norm, apply_date) = r
             cid, ktype = cluster_key(parcel, addr_norm, case_id)
             key_for_case.append((case_id, cid, ktype))
             clusters[cid].append({
                 "case_id": case_id, "lead_score": score, "lead_band": band,
                 "category": category, "valuation": valuation, "owner_name": o_name,
-                "owner_email": o_email, "owner_phone": o_phone, "has_contractor": has_c,
+                "owner_email": o_email, "owner_phone": o_phone,
+                "contact_role": contact_role, "has_contractor": has_c,
                 "address_display": addr, "main_parcel": parcel, "apply_date": apply_date,
             })
 

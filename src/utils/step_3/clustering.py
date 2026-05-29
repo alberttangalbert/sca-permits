@@ -57,6 +57,9 @@ def aggregate(cluster_id: str, key_type: str, members: list[dict]) -> dict:
         "owner_name": contact.get("owner_name"),
         "owner_email": contact.get("owner_email"),
         "owner_phone": contact.get("owner_phone"),
+        # Echo the picked contact's role so the cluster export can show
+        # "MILLER JIM (Architect)" the same way the per-permit list does.
+        "contact_role": contact.get("contact_role"),
         "has_contractor": 1 if any(m.get("has_contractor") for m in members) else 0,
         "first_apply_date": min(applies) if applies else None,
         "last_apply_date": max(applies) if applies else None,

@@ -328,6 +328,26 @@ class Clustering(unittest.TestCase):
         self.assertEqual(agg["owner_email"], "b@x.com")        # most complete contact
         self.assertEqual(agg["categories"], "ADDITION, NEW_SFR")
 
+    def test_aggregate_propagates_contact_role(self):
+        # Cluster's contact_role must echo the role of the MEMBER whose contact
+        # was chosen, so the deduped call list can label "Name (Architect)" the
+        # same way the per-permit list does. Don't default to OWNER on a non-
+        # owner contact (would mislabel the architect as the homeowner).
+        members = [
+            {"case_id": "a", "lead_score": 50.0, "owner_name": "Owner A",
+             "owner_email": None, "owner_phone": None, "contact_role": "OWNER",
+             "main_parcel": "P1", "apply_date": "2025-01-01"},
+            {"case_id": "b", "lead_score": 30.0, "owner_name": "Architect B",
+             "owner_email": "arc@x.com", "owner_phone": "555",
+             "contact_role": "ARCHITECT",
+             "main_parcel": "P1", "apply_date": "2025-03-01"},
+        ]
+        agg = aggregate("P:P1", "PARCEL", members)
+        # Anchor is "a" (higher score) but contact wins on completeness ("b").
+        self.assertEqual(agg["primary_case_id"], "a")
+        self.assertEqual(agg["owner_email"], "arc@x.com")
+        self.assertEqual(agg["contact_role"], "ARCHITECT")
+
 
 class CustomFieldsAndHolds(unittest.TestCase):
     def test_fnum_coercion(self):
@@ -502,7 +522,7 @@ class ExportSinceFloor(unittest.TestCase):
                 top_band TEXT, categories TEXT, total_valuation REAL,
                 max_valuation REAL, primary_case_id TEXT, address_display TEXT,
                 main_parcel TEXT, owner_name TEXT, owner_email TEXT,
-                owner_phone TEXT, has_contractor INTEGER,
+                owner_phone TEXT, contact_role TEXT, has_contractor INTEGER,
                 first_apply_date TEXT, last_apply_date TEXT);
         """)
         # 3 permits: pre-cutoff zombie, post-cutoff live, NULL-date oddball.
