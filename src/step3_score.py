@@ -37,7 +37,8 @@ LEAD_COLUMNS = [
     "case_id", "lead_score", "lead_band", "category",
     "type_fit", "size_factor", "status_factor", "contractor_factor",
     "recency_factor", "status_bucket", "valuation", "has_contractor",
-    "owner_name", "owner_email", "owner_phone", "contractor_name",
+    "owner_name", "owner_email", "owner_phone", "contact_role",
+    "contractor_name",
     "additional_sqft", "num_stories", "construction_type", "blocking_hold",
 ]
 

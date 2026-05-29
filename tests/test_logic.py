@@ -185,6 +185,44 @@ class Contacts(unittest.TestCase):
         self.assertIsNone(picked["owner_email"])
         self.assertIsNone(picked["owner_phone"])
 
+    def test_architect_recovers_unreachable_owner(self):
+        # Real-world case (BLD2024-00727): residential addition with an OWNER
+        # name but no contact, and a reachable ARCHITECT. The lead would have
+        # been silently unreachable; now the architect surfaces as the contact
+        # and contact_role labels it so the GC knows who they're calling.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "ROBERT J BRADY", "email": None,
+             "phone": None},
+            {"role": "ARCHITECT", "full_name": "JANG ARCHITECT JON",
+             "email": "f@jangarchitect.com", "phone": "555-arc"}])
+        self.assertEqual(picked["owner_name"], "JANG ARCHITECT JON")
+        self.assertEqual(picked["owner_email"], "f@jangarchitect.com")
+        self.assertEqual(picked["contact_role"], "ARCHITECT")
+
+    def test_agent_used_after_architect(self):
+        # Order: OWNER -> APPLICANT -> ARCHITECT -> AGENT. Agent only wins when
+        # no reachable owner/applicant/architect is available.
+        picked = pick_contacts([
+            {"role": "AGENT", "full_name": "Agent A", "email": "a@x", "phone": None},
+            {"role": "ARCHITECT", "full_name": "Arch A", "email": "arc@x", "phone": None}])
+        self.assertEqual(picked["contact_role"], "ARCHITECT")
+        self.assertEqual(picked["owner_email"], "arc@x")
+
+    def test_contact_role_is_owner_when_owner_reachable(self):
+        # When the owner is genuinely reachable, contact_role labels it OWNER --
+        # the UI doesn't show "Architect" when the owner picked the phone up.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "Real Owner", "email": "o@x", "phone": None},
+            {"role": "ARCHITECT", "full_name": "Arch", "email": "a@x", "phone": "555-2"}])
+        self.assertEqual(picked["contact_role"], "OWNER")
+
+    def test_contact_role_none_when_no_contact_anywhere(self):
+        # Empty contacts list -> nothing to surface, contact_role is None
+        # (not a misleading 'OWNER' default).
+        picked = pick_contacts([])
+        self.assertIsNone(picked["contact_role"])
+        self.assertIsNone(picked["owner_name"])
+
     def test_builder_owner_contractor_is_not_real_competition(self):
         # 'BUILDER OWNER' is the owner-builder stamp (homeowner acting as their
         # own contractor). It's NOT a hired contractor in the way that signals
@@ -456,7 +494,8 @@ class ExportSinceFloor(unittest.TestCase):
                 lead_band TEXT, category TEXT, status_bucket TEXT, valuation REAL,
                 additional_sqft REAL, num_stories REAL, construction_type TEXT,
                 blocking_hold INTEGER, has_contractor INTEGER, owner_name TEXT,
-                owner_email TEXT, owner_phone TEXT, contractor_name TEXT,
+                owner_email TEXT, owner_phone TEXT, contact_role TEXT,
+                contractor_name TEXT,
                 scored_at TEXT, cluster_id TEXT, cluster_key_type TEXT);
             CREATE TABLE sca_lead_clusters (cluster_id TEXT PRIMARY KEY,
                 key_type TEXT, permit_count INTEGER, max_lead_score REAL,

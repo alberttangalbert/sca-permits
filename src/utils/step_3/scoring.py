@@ -178,19 +178,35 @@ def _is_placeholder(c: dict) -> bool:
 
 
 def pick_contacts(contacts: list[dict]) -> dict:
-    """Choose the best owner/applicant and contractor contacts for outreach.
+    """Choose the best outreach contact for a lead (and the contractor signal).
 
-    Owner preference: a role==OWNER with an email > any OWNER > an APPLICANT
-    (for residential the applicant is usually the owner). Contractor: the first
-    role==CONTRACTOR; its presence is the `has_contractor` signal (bug #16: the
-    `role` field already keeps 'Agent for Owner' out of OWNER/CONTRACTOR).
+    Fallback chain (try each tier; the first whose best candidate is reachable
+    wins; if none is reachable, fall back to the strongest named contact from
+    the first tier that had one):
 
-    Placeholder names ('void void', 'builder owner') are dropped from the
-    candidate pool so the lead either falls through to a real contact or
-    becomes correctly unreachable, instead of surfacing a meaningless name."""
+        OWNER  ->  APPLICANT  ->  ARCHITECT  ->  AGENT
+
+    OWNER first because they're the buyer. APPLICANT second because on
+    residential permits the applicant is usually the owner or their direct
+    rep. ARCHITECT third because design-build leads route through the
+    architect — calling MILLER JIM the architect about Sanjay's new SFR is
+    a perfectly valid GC first move (audit 2026-05-29: ~10 HIGH/MEDIUM
+    leads had a reachable architect when the owner row was contactless).
+    AGENT last (the named representative — bug #16 protects against agents
+    misclassified as owners, so by here the agent is a real third-party rep).
+
+    The `contact_role` in the returned dict labels which tier won, so the
+    GC's call list can show "MILLER JIM (Architect)" rather than implying
+    the architect is the homeowner.
+
+    Contractor: any role==CONTRACTOR; its presence is the `has_contractor`
+    competitive signal. Placeholder identities ('void void', 'builder owner')
+    are dropped from BOTH pools so they never surface as a lead contact and
+    'BUILDER OWNER' (owner-builder stamp) never falsely triggers the
+    contractor-attached penalty."""
     real = [c for c in contacts if not _is_placeholder(c)]
-    owners = [c for c in real if c.get("role") == "OWNER"]
-    applicants = [c for c in real if c.get("role") == "APPLICANT"]
+    by_role = {role: [c for c in real if c.get("role") == role]
+               for role in ("OWNER", "APPLICANT", "ARCHITECT", "AGENT")}
     contractors = [c for c in real if c.get("role") == "CONTRACTOR"]
 
     def best(cands):
@@ -202,26 +218,32 @@ def pick_contacts(contacts: list[dict]) -> dict:
     def reachable(c):
         return bool(c and (c.get("email") or c.get("phone")))
 
-    # Prefer the owner, but only when we can actually reach them. On residential
-    # permits the applicant is usually the owner or their agent, so when the
-    # owner record carries a name but no phone/email, fall through to a reachable
-    # applicant instead of surfacing a dead contact. (The old `best(owners) or
-    # best(applicants)` only fell back when NO owner row existed at all, which
-    # stranded 18 actionable leads whose applicant held the only phone/email.)
-    bo, ba = best(owners), best(applicants)
-    if reachable(bo):
-        owner = bo
-    elif reachable(ba):
-        owner = ba
-    else:
-        owner = bo or ba
+    fallback_order = ("OWNER", "APPLICANT", "ARCHITECT", "AGENT")
+    best_by_role = {r: best(by_role[r]) for r in fallback_order}
+
+    contact = None
+    contact_role = None
+    for r in fallback_order:
+        if reachable(best_by_role[r]):
+            contact, contact_role = best_by_role[r], r
+            break
+    if contact is None:
+        # No reachable candidate anywhere — fall back to the strongest named
+        # contact from the first tier that had one, so the lead at least shows
+        # a real name (the WARN healthcheck correctly counts it unreachable).
+        for r in fallback_order:
+            if best_by_role[r] is not None:
+                contact, contact_role = best_by_role[r], r
+                break
+
     contractor = best(contractors)
     return {
-        "owner_name": (owner or {}).get("full_name") or (owner or {}).get("company"),
-        "owner_email": (owner or {}).get("email"),
-        "owner_phone": (owner or {}).get("phone"),
-        "contractor_name": (contractor or {}).get("company")
-                            or (contractor or {}).get("full_name") if contractor else None,
+        "owner_name": (contact or {}).get("full_name") or (contact or {}).get("company"),
+        "owner_email": (contact or {}).get("email"),
+        "owner_phone": (contact or {}).get("phone"),
+        "contact_role": contact_role,
+        "contractor_name": ((contractor or {}).get("company")
+                            or (contractor or {}).get("full_name")) if contractor else None,
         "has_contractor": 1 if contractors else 0,
     }
 
