@@ -34,9 +34,23 @@ def aggregate(cluster_id: str, key_type: str, members: list[dict]) -> dict:
     anchor = max(members, key=lambda m: (
         m.get("lead_score") or 0.0, m.get("valuation") or 0.0,
         m.get("apply_date") or ""))
-    # Outreach contact: most complete owner info, anchor winning ties.
-    contact = max(members, key=lambda m: (
-        _contact_completeness(m), m is anchor))
+    # Outreach contact: PREFER the anchor when its owner is reachable -- the
+    # anchor is the highest-scoring permit (typically the actual NEW_SFR /
+    # ADDITION project) and its surfaced owner_* already represents the best
+    # tier from pick_contacts on that permit. Falling through to a more-complete
+    # sibling permit's contact would replace e.g. "Sharron William (Owner)" on a
+    # new SFR with "Valley Heating (Applicant)" from a sub-trade HVAC permit at
+    # the same parcel -- the GC would think they're calling the homeowner when
+    # they're really calling the HVAC contractor. Only fall through when the
+    # anchor truly has no email AND no phone.
+    def _reachable(m):
+        return bool(m.get("owner_email")) or bool(m.get("owner_phone"))
+
+    if _reachable(anchor):
+        contact = anchor
+    else:
+        contact = max(members, key=lambda m: (
+            _contact_completeness(m), m is anchor))
 
     vals = [m.get("valuation") or 0.0 for m in members]
     cats = sorted({m.get("category") for m in members if m.get("category")})

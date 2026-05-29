@@ -433,6 +433,47 @@ class Clustering(unittest.TestCase):
         self.assertEqual(agg["owner_email"], "b@x.com")        # most complete contact
         self.assertEqual(agg["categories"], "ADDITION, NEW_SFR")
 
+    def test_anchor_wins_when_anchor_is_reachable(self):
+        # The cluster's surfaced contact MUST be the anchor's (the highest-scoring
+        # permit's) when the anchor's owner is reachable -- otherwise the GC's
+        # call list shows a sub-trade contractor's number from a sibling permit
+        # while the real homeowner of the lead project sits in the anchor row.
+        # Real-world case (BLDR2026-00123): SFR anchor with owner SHARRON WILLIAM
+        # was being overridden by an HVAC sub-trade permit's APPLICANT (Valley
+        # Heating). With the anchor reachable, anchor wins.
+        members = [
+            {"case_id": "anchor", "lead_score": 100.0, "owner_name": "SFR Owner",
+             "owner_email": "sfr@x.com", "owner_phone": None,
+             "contact_role": "OWNER",
+             "main_parcel": "P1", "apply_date": "2026-03-01"},
+            {"case_id": "subtrade", "lead_score": 3.0, "owner_name": "HVAC Co",
+             "owner_email": "hvac@x.com", "owner_phone": "555-1234567",
+             "contact_role": "APPLICANT",
+             "main_parcel": "P1", "apply_date": "2026-04-01"},
+        ]
+        agg = aggregate("P:P1", "PARCEL", members)
+        self.assertEqual(agg["primary_case_id"], "anchor")
+        self.assertEqual(agg["owner_name"], "SFR Owner")
+        self.assertEqual(agg["contact_role"], "OWNER")
+
+    def test_sibling_wins_when_anchor_contactless(self):
+        # Only fall through to a sibling when the anchor has truly no contact
+        # (no email AND no phone). This is the original case the fall-through
+        # was designed for -- preserve it.
+        members = [
+            {"case_id": "anchor", "lead_score": 100.0, "owner_name": "Contactless",
+             "owner_email": None, "owner_phone": None, "contact_role": "OWNER",
+             "main_parcel": "P1", "apply_date": "2026-03-01"},
+            {"case_id": "sibling", "lead_score": 30.0, "owner_name": "Reachable",
+             "owner_email": "r@x.com", "owner_phone": "555-1234567",
+             "contact_role": "APPLICANT",
+             "main_parcel": "P1", "apply_date": "2026-04-01"},
+        ]
+        agg = aggregate("P:P1", "PARCEL", members)
+        self.assertEqual(agg["primary_case_id"], "anchor")
+        self.assertEqual(agg["owner_name"], "Reachable")
+        self.assertEqual(agg["contact_role"], "APPLICANT")
+
     def test_aggregate_propagates_contact_role(self):
         # Cluster's contact_role must echo the role of the MEMBER whose contact
         # was chosen, so the deduped call list can label "Name (Architect)" the
