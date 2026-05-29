@@ -90,6 +90,13 @@ class Roles(unittest.TestCase):
         self.assertEqual(normalize_role("Applicant"), "APPLICANT")
         self.assertIsNone(normalize_role(None))
 
+    def test_designer_is_first_class_role(self):
+        # 'Designer' was the biggest occupant of the OTHER bucket pre-fix
+        # (1,623 contacts, 76% email-reachable). Promote it to a real role
+        # so the contact chain can use it on residential design-build leads.
+        self.assertEqual(normalize_role("Designer"), "DESIGNER")
+        self.assertEqual(normalize_role("Interior Designer"), "DESIGNER")
+
 
 class Factors(unittest.TestCase):
     def test_size_factor_buckets(self):
@@ -200,13 +207,34 @@ class Contacts(unittest.TestCase):
         self.assertEqual(picked["contact_role"], "ARCHITECT")
 
     def test_agent_used_after_architect(self):
-        # Order: OWNER -> APPLICANT -> ARCHITECT -> AGENT. Agent only wins when
-        # no reachable owner/applicant/architect is available.
+        # Order: OWNER -> APPLICANT -> ARCHITECT -> DESIGNER -> ENGINEER -> AGENT.
+        # Agent only wins when no higher-tier reachable contact is available.
         picked = pick_contacts([
             {"role": "AGENT", "full_name": "Agent A", "email": "a@x", "phone": None},
             {"role": "ARCHITECT", "full_name": "Arch A", "email": "arc@x", "phone": None}])
         self.assertEqual(picked["contact_role"], "ARCHITECT")
         self.assertEqual(picked["owner_email"], "arc@x")
+
+    def test_designer_recovers_unreachable_owner(self):
+        # Real-world case (BLD2024-00925): residential ADDITION with contactless
+        # OWNER and a Designer contact with full email+phone. Pre-fix the
+        # designer was bucketed into OTHER and the lead stayed unreachable.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "DEREK FUNG", "email": None, "phone": None},
+            {"role": "DESIGNER", "full_name": "Lu Xin",
+             "email": "info@orengr.com", "phone": "555"}])
+        self.assertEqual(picked["contact_role"], "DESIGNER")
+        self.assertEqual(picked["owner_email"], "info@orengr.com")
+
+    def test_chain_skips_unreachable_designer_to_engineer(self):
+        # The chain stops at the first REACHABLE tier, not just the first tier
+        # that exists. A named-but-contactless designer doesn't block engineer.
+        picked = pick_contacts([
+            {"role": "DESIGNER", "full_name": "Named Designer", "email": None,
+             "phone": None},
+            {"role": "ENGINEER", "full_name": "Reachable Engineer",
+             "email": "e@x", "phone": None}])
+        self.assertEqual(picked["contact_role"], "ENGINEER")
 
     def test_contact_role_is_owner_when_owner_reachable(self):
         # When the owner is genuinely reachable, contact_role labels it OWNER --

@@ -184,7 +184,7 @@ def pick_contacts(contacts: list[dict]) -> dict:
     wins; if none is reachable, fall back to the strongest named contact from
     the first tier that had one):
 
-        OWNER  ->  APPLICANT  ->  ARCHITECT  ->  AGENT
+        OWNER -> APPLICANT -> ARCHITECT -> DESIGNER -> ENGINEER -> AGENT
 
     OWNER first because they're the buyer. APPLICANT second because on
     residential permits the applicant is usually the owner or their direct
@@ -192,8 +192,12 @@ def pick_contacts(contacts: list[dict]) -> dict:
     architect — calling MILLER JIM the architect about Sanjay's new SFR is
     a perfectly valid GC first move (audit 2026-05-29: ~10 HIGH/MEDIUM
     leads had a reachable architect when the owner row was contactless).
-    AGENT last (the named representative — bug #16 protects against agents
-    misclassified as owners, so by here the agent is a real third-party rep).
+    DESIGNER fourth — same role for smaller residential jobs (ADU/REMODEL/
+    ADDITION); the 2026-05-29 audit found 3 more unreachable MEDIUM leads
+    had a fully-reachable Designer with email+phone. ENGINEER fifth (54%
+    email, weaker B2B fit but still a real pro). AGENT last because the
+    role has only 4% email/phone reachability — almost always procedural,
+    last-resort only when no design or engineering pro is on file.
 
     The `contact_role` in the returned dict labels which tier won, so the
     GC's call list can show "MILLER JIM (Architect)" rather than implying
@@ -205,8 +209,10 @@ def pick_contacts(contacts: list[dict]) -> dict:
     'BUILDER OWNER' (owner-builder stamp) never falsely triggers the
     contractor-attached penalty."""
     real = [c for c in contacts if not _is_placeholder(c)]
+    fallback_order = ("OWNER", "APPLICANT", "ARCHITECT", "DESIGNER",
+                      "ENGINEER", "AGENT")
     by_role = {role: [c for c in real if c.get("role") == role]
-               for role in ("OWNER", "APPLICANT", "ARCHITECT", "AGENT")}
+               for role in fallback_order}
     contractors = [c for c in real if c.get("role") == "CONTRACTOR"]
 
     def best(cands):
@@ -217,8 +223,6 @@ def pick_contacts(contacts: list[dict]) -> dict:
 
     def reachable(c):
         return bool(c and (c.get("email") or c.get("phone")))
-
-    fallback_order = ("OWNER", "APPLICANT", "ARCHITECT", "AGENT")
     best_by_role = {r: best(by_role[r]) for r in fallback_order}
 
     contact = None

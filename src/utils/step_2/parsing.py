@@ -62,7 +62,13 @@ def _bint(v):
 
 def normalize_role(role_raw: str | None) -> str | None:
     """Map ContactTypeName to a coarse role bucket. AGENT is tested first so an
-    'Agent for Owner' never collapses into OWNER (cu-permits bug #16)."""
+    'Agent for Owner' never collapses into OWNER (cu-permits bug #16).
+
+    DESIGNER is a first-class role (added 2026-05-29 audit): "Designer" was the
+    single biggest role_raw in the catch-all OTHER bucket (1,623 contacts,
+    76%/89% email/phone reachability). For residential ADU/REMODEL/ADDITION
+    leads where the owner is contactless, the designer IS a valid B2B
+    contact — same as the architect, just for smaller jobs."""
     if not role_raw:
         return None
     r = role_raw.lower()
@@ -76,6 +82,8 @@ def normalize_role(role_raw: str | None) -> str | None:
         return "OWNER"
     if "architect" in r:
         return "ARCHITECT"
+    if "designer" in r:
+        return "DESIGNER"
     if "engineer" in r:
         return "ENGINEER"
     if "tenant" in r:
