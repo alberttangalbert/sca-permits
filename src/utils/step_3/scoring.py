@@ -160,16 +160,38 @@ def recency_factor(apply_date: str | None, today: dt.date | None = None) -> floa
     return _RECENCY_FLOOR
 
 
+# EnerGov / Tyler placeholder identities. These appear in the source data with
+# no real homeowner identity attached: 'void void' is the redacted-applicant
+# placeholder (~65 rows, all unreachable); 'builder owner' is the owner-builder
+# generic stamp (~5,000 rows, almost always with a stock 925-area phone that
+# doesn't route to the homeowner). Surfacing them as `owner_name` on a lead is
+# noise — the GC's call list ends up with "Call void void at [blank]" rows, or
+# "BUILDER OWNER" rows where the phone is a placeholder. Filter at the
+# candidate-pool level so the lead falls through to a real contact if one
+# exists, or becomes properly unreachable (and the WARN healthcheck flags it).
+_PLACEHOLDER_NAMES = {"void void", "builder owner", "test test", "redacted redacted"}
+
+
+def _is_placeholder(c: dict) -> bool:
+    name = (c.get("full_name") or "").strip().lower()
+    return name in _PLACEHOLDER_NAMES
+
+
 def pick_contacts(contacts: list[dict]) -> dict:
     """Choose the best owner/applicant and contractor contacts for outreach.
 
     Owner preference: a role==OWNER with an email > any OWNER > an APPLICANT
     (for residential the applicant is usually the owner). Contractor: the first
     role==CONTRACTOR; its presence is the `has_contractor` signal (bug #16: the
-    `role` field already keeps 'Agent for Owner' out of OWNER/CONTRACTOR)."""
-    owners = [c for c in contacts if c.get("role") == "OWNER"]
-    applicants = [c for c in contacts if c.get("role") == "APPLICANT"]
-    contractors = [c for c in contacts if c.get("role") == "CONTRACTOR"]
+    `role` field already keeps 'Agent for Owner' out of OWNER/CONTRACTOR).
+
+    Placeholder names ('void void', 'builder owner') are dropped from the
+    candidate pool so the lead either falls through to a real contact or
+    becomes correctly unreachable, instead of surfacing a meaningless name."""
+    real = [c for c in contacts if not _is_placeholder(c)]
+    owners = [c for c in real if c.get("role") == "OWNER"]
+    applicants = [c for c in real if c.get("role") == "APPLICANT"]
+    contractors = [c for c in real if c.get("role") == "CONTRACTOR"]
 
     def best(cands):
         if not cands:

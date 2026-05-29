@@ -163,6 +163,43 @@ class Contacts(unittest.TestCase):
         self.assertEqual(picked["owner_name"], "Owner")
         self.assertEqual(picked["owner_email"], "o@x")
 
+    def test_void_void_placeholder_does_not_surface_as_owner(self):
+        # EnerGov's redacted-applicant marker: it has no real identity, so it
+        # must not be picked as the lead's owner. Fall through to real contacts.
+        picked = pick_contacts([
+            {"role": "APPLICANT", "full_name": "void void", "email": None,
+             "phone": None},
+            {"role": "OWNER", "full_name": "Real Owner", "email": "r@x",
+             "phone": "555-r"}])
+        self.assertEqual(picked["owner_name"], "Real Owner")
+        self.assertEqual(picked["owner_email"], "r@x")
+
+    def test_void_void_only_contact_yields_unreachable_lead(self):
+        # When the ONLY candidate is a placeholder, the lead is correctly
+        # marked unreachable (no garbage name surfaced) — the healthcheck WARN
+        # will count it as a source-data gap, which is the accurate picture.
+        picked = pick_contacts([
+            {"role": "APPLICANT", "full_name": "void void", "email": None,
+             "phone": None}])
+        self.assertIsNone(picked["owner_name"])
+        self.assertIsNone(picked["owner_email"])
+        self.assertIsNone(picked["owner_phone"])
+
+    def test_builder_owner_contractor_is_not_real_competition(self):
+        # 'BUILDER OWNER' is the owner-builder stamp (homeowner acting as their
+        # own contractor). It's NOT a hired contractor in the way that signals
+        # "the GC already lost this lead" -> filter it from the contractor pool
+        # too. has_contractor stays 0 so the owner-builder permit doesn't get
+        # the 0.8 contractor-penalty applied -> these stay high-quality leads.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "Real Owner", "email": "r@x",
+             "phone": "555-r"},
+            {"role": "CONTRACTOR", "full_name": "BUILDER OWNER",
+             "email": None, "phone": "9253674813"}])
+        self.assertEqual(picked["has_contractor"], 0)
+        self.assertIsNone(picked["contractor_name"])
+        self.assertEqual(picked["owner_name"], "Real Owner")
+
 
 class ScoreRecord(unittest.TestCase):
     def test_blocking_hold_and_contractor_factors(self):
