@@ -109,6 +109,22 @@ def status_factor(case_status: str | None) -> tuple[float, str]:
     return STATUS_FACTOR[bucket], bucket
 
 
+# City workers sometimes void a permit by editing the DESCRIPTION ("VOID WRONG
+# PERMIT TYPE ...", "DUPLICATE PERMIT ...") without flipping case_status to
+# Void. 2 such permits (BLDR2026-00220, BLDR2026-00057) currently sit at
+# 'Submitted - Online' yet self-describe as voided -- they were leaking
+# through as MEDIUM-band actionable leads on 2026-05-29. Detecting the
+# description prefix lets us treat them as DEAD without waiting on the city
+# to fix the status field.
+_DESCRIPTION_VOID = re.compile(
+    r"^\s*(void|wrong permit type|duplicate permit|repeat permit|voided)",
+    re.IGNORECASE)
+
+
+def looks_voided(description: str | None) -> bool:
+    return bool(description) and bool(_DESCRIPTION_VOID.match(description))
+
+
 def size_factor(valuation: float | None) -> float:
     """Bucketed project size. Missing/0 valuation → neutral 0.35 (don't zero a
     real project just because the field is blank)."""
@@ -303,6 +319,13 @@ def score_record(case_type, case_status, description, valuation, contacts, *,
     type_fit, category = classify_type(case_type, description)
     sf = size_factor(valuation)
     stf, bucket = status_factor(case_status)
+    # Description-based void detection: when a permit self-describes as
+    # voided (city edited the description but forgot to flip status), force
+    # the DEAD status bucket so it doesn't ride status="Submitted" into the
+    # actionable funnel. This is the smallest possible override -- only
+    # cuts in when status_bucket isn't already DEAD/COMPLETE.
+    if bucket not in ("DEAD", "COMPLETE") and looks_voided(description):
+        stf, bucket = STATUS_FACTOR["DEAD"], "DEAD"
     picked = pick_contacts(contacts)
     contractor_factor = 0.8 if picked["has_contractor"] else 1.0
     blocking = 1 if (blocking_hold_count or 0) > 0 else 0

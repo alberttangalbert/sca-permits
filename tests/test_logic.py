@@ -117,6 +117,30 @@ class Factors(unittest.TestCase):
         self.assertEqual(status_factor("Expired"), (0.03, "DEAD"))
         self.assertEqual(status_factor("Nonsense"), (0.4, "UNKNOWN"))
 
+    def test_description_void_override_dead(self):
+        # Real-world case (BLDR2026-00220, BLDR2026-00057): permit's status is
+        # still 'Submitted - Online' but the description has been edited to
+        # 'VOID WRONG PERMIT TYPE ...' by a city worker who forgot to flip
+        # status. The lead must NOT ride that status into MEDIUM/HIGH.
+        scored = score_record(
+            case_type="Building Residential-New Single Family",
+            case_status="Submitted - Online",
+            description="VOID WRONG PERMIT TYPE 2(two) heat pump installation",
+            valuation=600000, contacts=[])
+        self.assertEqual(scored["status_bucket"], "DEAD")
+        self.assertEqual(scored["lead_band"], "DROP")
+
+    def test_description_void_does_not_override_complete(self):
+        # If a permit ALREADY completed (Finaled), a void-looking description
+        # is just historical -- don't override the COMPLETE bucket. The 0.05
+        # COMPLETE factor is already low enough; further override is noise.
+        scored = score_record(
+            case_type="Building Residential-New Single Family",
+            case_status="Finaled",
+            description="VOID WRONG PERMIT TYPE (original record)",
+            valuation=600000, contacts=[])
+        self.assertEqual(scored["status_bucket"], "COMPLETE")
+
     def test_band_boundaries(self):
         self.assertEqual(band(50), "HIGH")
         self.assertEqual(band(49.9), "MEDIUM")
