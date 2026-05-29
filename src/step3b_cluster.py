@@ -60,6 +60,28 @@ def main(args) -> int:
         # had NULL search-parcel but a valid detail-parcel, forcing them onto
         # ADDRESS-key clustering and stranding them as separate one-permit
         # projects). COALESCE picks the better source per record.
+        #
+        # SECOND-PASS canonicalization (added 2026-05-29): even after COALESCE
+        # some permits at SFR addresses still have NULL parcel (both search AND
+        # detail were missing it). Sibling permits at the SAME address_norm
+        # often have the parcel filled in -- if exactly one parcel is seen at
+        # that address, that's the canonical parcel for the property, and the
+        # NULL-parcel sibling should adopt it so they cluster together (5
+        # actionable clusters were split this way pre-fix). Address_norm with
+        # MULTIPLE distinct parcels (multi-unit buildings) is NOT canonicalized
+        # -- those legitimately have different parcels per unit and shouldn't
+        # over-collapse.
+        canonical_parcel = {
+            row[0]: row[1] for row in conn.execute("""
+                SELECT p.address_norm, MIN(COALESCE(d.main_parcel, p.main_parcel))
+                FROM sca_permits p LEFT JOIN sca_permit_detail d USING(case_id)
+                WHERE p.address_norm IS NOT NULL AND p.address_norm != ''
+                  AND COALESCE(d.main_parcel, p.main_parcel) IS NOT NULL
+                  AND COALESCE(d.main_parcel, p.main_parcel) != ''
+                GROUP BY p.address_norm
+                HAVING COUNT(DISTINCT COALESCE(d.main_parcel, p.main_parcel)) = 1
+            """).fetchall()
+        }
         rows = conn.execute(
             "SELECT l.case_id, l.lead_score, l.lead_band, l.category, l.valuation, "
             "l.owner_name, l.owner_email, l.owner_phone, l.contact_role, "
@@ -71,9 +93,13 @@ def main(args) -> int:
 
         clusters: dict[str, list[dict]] = defaultdict(list)
         key_for_case: list[tuple[str, str, str]] = []
+        canonicalized = 0
         for r in rows:
             (case_id, score, band, category, valuation, o_name, o_email, o_phone,
              contact_role, has_c, addr, parcel, addr_norm, apply_date) = r
+            if not parcel and addr_norm and addr_norm in canonical_parcel:
+                parcel = canonical_parcel[addr_norm]
+                canonicalized += 1
             cid, ktype = cluster_key(parcel, addr_norm, case_id)
             key_for_case.append((case_id, cid, ktype))
             clusters[cid].append({
@@ -84,6 +110,9 @@ def main(args) -> int:
                 "address_display": addr, "main_parcel": parcel, "apply_date": apply_date,
             })
 
+        if canonicalized:
+            print(f"[{run_id}] canonicalized: {canonicalized} permits adopted a "
+                  f"sibling's parcel (NULL parcel + single-parcel address)")
         key_types = Counter(kt for _, _, kt in key_for_case)
         # Build one summary row per cluster, with that cluster's key type.
         ktype_by_cid = {cid: kt for _, cid, kt in key_for_case}
