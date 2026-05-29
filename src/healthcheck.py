@@ -86,6 +86,29 @@ COUNT_CHECKS = [
      "AND ((owner_email IS NOT NULL AND owner_email != '') "
      "  OR (owner_phone IS NOT NULL AND owner_phone != '') "
      "  OR (owner_name IS NOT NULL AND owner_name != ''))"),
+    # cluster_id format must agree with cluster_key_type: PARCEL -> "P:<...>",
+    # ADDRESS -> "A:<...>", SINGLETON -> "C:<...>" (the prefixes are how the
+    # D1 prune step distinguishes them and how the cluster spec maps to the
+    # right export. A code refactor that breaks the prefix convention would
+    # silently corrupt cluster membership; catch it here.
+    ("FAIL", "leads: cluster_id prefix matches cluster_key_type",
+     "SELECT COUNT(*) FROM sca_leads WHERE cluster_id IS NOT NULL AND "
+     "((cluster_key_type='PARCEL'    AND cluster_id NOT LIKE 'P:%') OR "
+     " (cluster_key_type='ADDRESS'   AND cluster_id NOT LIKE 'A:%') OR "
+     " (cluster_key_type='SINGLETON' AND cluster_id NOT LIKE 'C:%'))"),
+    # Per-cluster permit_count must match actual member count. Catches drift
+    # where step3b's aggregate persisted a count that doesn't match the
+    # leads that now point at the cluster (e.g. partial re-cluster on a
+    # subset of cases). The cluster-wide SUM invariant lower in this file
+    # would catch some such drift but not a balanced miscount.
+    ("FAIL", "clusters: permit_count matches actual lead members",
+     """SELECT COUNT(*) FROM sca_lead_clusters c WHERE c.permit_count !=
+        (SELECT COUNT(*) FROM sca_leads l WHERE l.cluster_id=c.cluster_id)"""),
+    # Non-positive valuation must never round-trip into the lead row.
+    # size_factor already treats <=0 as neutral, but the column should be
+    # NULL'd so D1 doesn't display "-$9" or "$0" as a real valuation.
+    ("FAIL", "leads: valuation is positive or NULL (never 0 or negative)",
+     "SELECT COUNT(*) FROM sca_leads WHERE valuation IS NOT NULL AND valuation <= 0"),
 ]
 
 
