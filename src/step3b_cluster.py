@@ -55,12 +55,19 @@ def main(args) -> int:
 
     conn = connect()
     try:
+        # main_parcel: detail's structured Addresses[].ParcelNumber is more
+        # complete than the search row's MainParcel (182 leads on 2026-05-29
+        # had NULL search-parcel but a valid detail-parcel, forcing them onto
+        # ADDRESS-key clustering and stranding them as separate one-permit
+        # projects). COALESCE picks the better source per record.
         rows = conn.execute(
             "SELECT l.case_id, l.lead_score, l.lead_band, l.category, l.valuation, "
             "l.owner_name, l.owner_email, l.owner_phone, l.contact_role, "
             "l.has_contractor, "
-            "p.address_display, p.main_parcel, p.address_norm, p.apply_date "
-            "FROM sca_leads l JOIN sca_permits p USING(case_id)").fetchall()
+            "p.address_display, COALESCE(d.main_parcel, p.main_parcel) AS main_parcel, "
+            "p.address_norm, p.apply_date "
+            "FROM sca_leads l JOIN sca_permits p USING(case_id) "
+            "LEFT JOIN sca_permit_detail d USING(case_id)").fetchall()
 
         clusters: dict[str, list[dict]] = defaultdict(list)
         key_for_case: list[tuple[str, str, str]] = []
