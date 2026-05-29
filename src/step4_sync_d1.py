@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -134,15 +135,26 @@ def _schema_sql(spec) -> str:
     return f"CREATE TABLE IF NOT EXISTS {spec['table']} (\n  {cols}\n);\n" + idx
 
 
+# Collapse newline / tab / CR / other ASCII control chars to a single space so
+# each row stays on one line in the generated SQL. EnerGov descriptions like
+# "Installation of utility\nconnection (...)" embedded literal newlines into
+# 80 actionable rows; SQLite tolerates them inside a string literal but it
+# makes the .sql file unreadable and risks breaking strict client parsers.
+# DEL (0x7f) is included for completeness. Multi-byte UTF-8 is preserved.
+_CTRL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _lit(v) -> str:
-    """SQL literal for a generated statement (None->NULL, escape quotes)."""
+    """SQL literal for a generated statement (None->NULL, escape quotes,
+    collapse control chars to space)."""
     if v is None:
         return "NULL"
     if isinstance(v, bool):
         return "1" if v else "0"
     if isinstance(v, (int, float)):
         return repr(v)
-    return "'" + str(v).replace("'", "''") + "'"
+    s = _CTRL_CHARS.sub(" ", str(v).replace("'", "''"))
+    return "'" + s + "'"
 
 
 def _fetch_rows(conn, spec, bands, since, limit):

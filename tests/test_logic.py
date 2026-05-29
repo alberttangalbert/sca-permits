@@ -542,6 +542,16 @@ class SqlLiteral(unittest.TestCase):
         self.assertEqual(_lit("plain"), "'plain'")
         self.assertEqual(_lit("it's a 10'-0\" deck"), "'it''s a 10''-0\" deck'")
 
+    def test_lit_collapses_control_chars(self):
+        # EnerGov descriptions sometimes embed literal newlines (80 actionable
+        # rows on 2026-05-29), breaking one-line-per-row SQL formatting and
+        # risking strict-parser breakage. Collapse newline / tab / CR / other
+        # ASCII control chars to a single space; preserve unicode.
+        self.assertEqual(_lit("line1\nline2"), "'line1 line2'")
+        self.assertEqual(_lit("col1\tcol2"), "'col1 col2'")
+        self.assertEqual(_lit("a\r\nb"), "'a  b'")
+        self.assertEqual(_lit("café"), "'café'")  # unicode survives
+
 
 class PruneStatement(unittest.TestCase):
     SPEC = {"table": "sca_leads", "columns": [("case_id", "TEXT PRIMARY KEY"),
