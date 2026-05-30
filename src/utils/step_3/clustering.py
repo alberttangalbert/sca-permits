@@ -13,12 +13,25 @@ anywhere in the project (preferring the anchor's).
 from __future__ import annotations
 
 
+# Single-word street-suffix tokens that aren't real addresses: an EnerGov
+# data-entry mishap leaves the type suffix alone after city-tail stripping
+# ("DR San Carlos CA 94070" -> address_norm "DR"). Keying on these merges
+# unrelated permits into one bogus cluster (e.g. A:DR pulling together two
+# cancelled permits at different physical sites). Detected 2026-05-29 (impact:
+# 4 clusters, all DROP/Cancelled, 0 actionable). The set is conservative -- only
+# the lone-suffix case is caught; "HIGHLANDS PARK" or "CORNER ARROYO / EL
+# CAMINO REAL" stay valid ADDRESS keys because they're multi-word landmarks
+# that legitimately cluster together.
+_LONE_STREET_SUFFIX = {"ST", "AVE", "BLVD", "DR", "RD", "LN", "CT", "WAY",
+                       "TER", "PL", "CIR", "PKWY", "HWY", "PK"}
+
+
 def cluster_key(main_parcel, address_norm, case_id) -> tuple[str, str]:
     p = (main_parcel or "").strip()
     if p:
         return f"P:{p}", "PARCEL"
     a = (address_norm or "").strip()
-    if a:
+    if a and a.upper() not in _LONE_STREET_SUFFIX:
         return f"A:{a}", "ADDRESS"
     return f"C:{case_id}", "SINGLETON"
 

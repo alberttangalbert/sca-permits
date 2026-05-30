@@ -433,6 +433,19 @@ class Clustering(unittest.TestCase):
                          ("A:123 main", "ADDRESS"))
         self.assertEqual(cluster_key("  ", "", "CID"), ("C:CID", "SINGLETON"))
 
+    def test_lone_street_suffix_is_singleton(self):
+        # 'DR', 'AVE', 'BLVD' etc. by themselves are EnerGov data-entry
+        # leftovers, not real address keys. They must NOT cluster two
+        # unrelated permits together via 'A:DR'.
+        self.assertEqual(cluster_key(None, "DR", "C1"), ("C:C1", "SINGLETON"))
+        self.assertEqual(cluster_key(None, "AVE", "C2"), ("C:C2", "SINGLETON"))
+        self.assertEqual(cluster_key(None, "BLVD", "C3"), ("C:C3", "SINGLETON"))
+        # Multi-word landmarks stay valid ADDRESS keys (real groupings).
+        self.assertEqual(cluster_key(None, "HIGHLANDS PARK", "C4"),
+                         ("A:HIGHLANDS PARK", "ADDRESS"))
+        self.assertEqual(cluster_key(None, "CORNER ARROYO / EL CAMINO REAL", "C5"),
+                         ("A:CORNER ARROYO / EL CAMINO REAL", "ADDRESS"))
+
     def test_aggregate_anchor_and_sums(self):
         members = [
             {"case_id": "a", "lead_score": 50.0, "lead_band": "HIGH",
