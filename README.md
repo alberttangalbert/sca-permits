@@ -12,21 +12,30 @@ This build covers **steps 0–4** for the **Permit** module:
 
 - **Step 0/1 — search + parse:** page through the full public result set
   (year-chunked to beat the Elasticsearch 10k cap) and build a deduped permit
-  table keyed on the EnerGov record GUID. **52,933 permits loaded** (1999–present).
+  table keyed on the EnerGov record GUID. **~53k permits loaded** (1999–present).
 - **Step 2 — detail enrichment:** one anonymous GET per record adds the fields
-  search omits — **valuation** (the size signal), **owner/applicant/contractor
-  contacts** (names, company, email, phone — public!), parcel/APN, and holds.
-  The recent window (2025–2026, **2,913 records**) is enriched.
+  search omits — **valuation** (the size signal), **owner/applicant/contractor/
+  architect/designer/engineer contacts** (names, company, email, phone — public!),
+  parcel/APN, and holds. Backfill horizon: 2020-present (default; see
+  `tick.py --backfill-since`). **~46k records** enriched at last sync.
 - **Step 3 — lead scoring:** rank each enriched permit into a banded lead
-  (`HIGH`/`MEDIUM`/`LOW`/`DROP`) and denormalize the best owner + contractor
-  contact for outreach. Of the 2,913 enriched records, **57 score HIGH and 84
-  MEDIUM** — a ~5% funnel of new-SFR / ADU / addition projects that are
-  approved-or-near but pre-contractor.
+  (`HIGH`/`MEDIUM`/`LOW`/`DROP`) and denormalize the best contact (and the role
+  it came from — see "Outreach contact selection" below) plus contractor info
+  for outreach. Of ~46k enriched records, post-2020 typically has **56 HIGH +
+  130 MEDIUM + ~290 LOW** — the actionable funnel of new-SFR / ADU / addition
+  projects that are approved-or-near but pre-contractor.
 
 - **Step 3b — clustering:** fold a parcel's permits into one project so the GC
-  doesn't call the same owner once per permit. Measured: 2,918 leads collapse to
-  ~2,116 projects. `sca_lead_clusters` is the deduped call list (one row per
-  project, anchored on the strongest permit).
+  doesn't call the same owner once per permit. Clustering key precedence:
+  `main_parcel` (PARCEL) → `address_norm` (ADDRESS) → `case_id` (SINGLETON).
+  Detail-row `MainParcel` is used when the search row's is NULL, and a
+  per-address parcel-canonicalization pass adopts a sibling permit's parcel
+  for permits at addresses with exactly one observed parcel. Measured:
+  ~46k leads collapse to ~10k projects. `sca_lead_clusters` is the deduped
+  call list (one row per project, anchored on the strongest permit;
+  contact info from the anchor when reachable, falling through to siblings
+  otherwise — useful because the LYNCH-trust-style cases find historical
+  contact info on a 2007 sibling for a 2024 anchor).
 - **Step 4 — D1 sync:** publish to the **shared `permits` D1** (the `sca_`
   prefix keeps the tables clear of the other cities'): `sca_leads` (per-permit,
   default) and `sca_lead_clusters` (deduped projects, `--clusters`). Defaults to
@@ -83,24 +92,55 @@ A multiplicative **gates × factors** model (the cu-permits architecture,
 re-derived for San Carlos's real type/status vocabulary):
 
 ```
-lead_score = 100 · type_fit · size_factor · status_factor · contractor_factor
+lead_score = 100 · type_fit · size_factor · status_factor
+                 · contractor_factor · hold_factor · recency_factor
 ```
 
 - **`type_fit`** (`src/utils/step_3/type_fit_rules.json`) — ordered substring
   match on `case_type`: new SFR / ADU / second-unit = 1.0, addition = 0.9,
   interior remodel = 0.75, sub-trades (solar, reroof, HVAC, electrical…) ≈ 0.1,
   commercial = 0.2. A description-keyword pass upgrades the broad
-  "Miscellaneous" bucket when it names an ADU / addition / new dwelling.
+  "Miscellaneous" bucket when it names an ADU / addition / new dwelling. A
+  separate description-prefix override (`^VOID|WRONG PERMIT TYPE|...`) forces
+  DEAD status when a city worker void-marked the description but left the
+  case_status stale.
 - **`size_factor`** — bucketed from EnerGov `ValuationValue` (the size signal
   Cupertino lacked); a missing/0 valuation is neutral, not zero.
 - **`status_factor`** — the near-issuance window scores highest (`Approved`,
   `Fees Due`, `Fees Paid`); `Finaled` / `Expired` / `Cancelled` ≈ 0.
 - **`contractor_factor`** — a permit with **no contractor attached** is the
   better lead (homeowner hasn't engaged one yet) → 1.0, else 0.8.
+- **`hold_factor`** — an active non-expired hold means the project is stuck at
+  the city; lightly de-prioritized (0.9) and flagged for the caller.
+- **`recency_factor`** — soft decay with `apply_date` age (≤1y 1.0 / 1-2y 0.8 /
+  2-3y 0.55 / 3-5y 0.3 / >5y 0.1). Demotes migrated pre-cutover records frozen
+  at `Approved` (28% of the actionable funnel was >5y dead before this).
 
 Banded `HIGH ≥ 50`, `MEDIUM ≥ 22`, `LOW ≥ 7`, else `DROP`. Results land in
 `sca_leads` with the best owner/contractor contact denormalized for outreach.
 Re-scoring is a seconds-long re-run (`--rebuild`), never a re-fetch.
+
+### Outreach contact selection (step 3)
+
+The lead's surfaced contact is picked by walking a six-tier reachability chain
+on the permit's `Contacts[]`:
+
+```
+OWNER -> APPLICANT -> ARCHITECT -> DESIGNER -> ENGINEER -> AGENT
+```
+
+The first tier whose best candidate has email OR phone wins. `contact_role` on
+`sca_leads` (migration 0007) labels which tier was picked so the GC's call list
+renders "Name (Architect)" instead of mislabeling the architect as the
+homeowner. Migration 0008 propagates the same field to `sca_lead_clusters`.
+
+Three families of source-data placeholders are dropped from the candidate pool
+BEFORE the chain runs: `void void` (redacted-applicant marker), `BUILDER OWNER`
+(owner-builder generic stamp + placeholder 925-area phone), and
+`EnerGov YYYYQN` (Tyler migration / sync stamp paired with the
+`energovconversion@tylertech.com` email). Typo emails (multiple `@`'s, no `.`)
+and sub-10-digit phones are NULL'd before the ranking so garbage can't beat a
+real lower-tier candidate.
 
 ## Setup
 
