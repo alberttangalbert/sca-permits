@@ -38,13 +38,13 @@ class SearchError(RuntimeError):
 # "Authorization has been denied" under load even on records/queries it serves
 # anonymously a moment later (confirmed against detail GETs 2026-05-29). Retrying
 # the SAME anonymous request rides through it — no credentials are ever added.
-# 500 is added for the same reason: 2026-05-30 03:10 local saw a sustained portal
-# outage returning HTTP 500 "An error has occurred." A brief 500 during a
-# deploy / pool restart self-heals; the retry rides it through and a sustained
-# outage still bubbles up as a SearchError after exhausting retries (bounded).
-# Critical here: a transient 401/500 on a search page would otherwise abort the
-# whole (critical) refresh; this lets the existing backoff absorb it instead.
-RETRY_STATUS = {401, 429, 500, 503}   # transient — back off and retry
+# 500/502/503/504 (the whole 5xx-transient family) are added because EnerGov has
+# been observed in all of these states during a deploy / pool restart. The
+# 2026-05-30 03:10 outage flapped 500 -> 502 as it recovered. A brief 5xx
+# self-heals; the retry rides it through and a sustained outage still bubbles
+# up as a SearchError after exhausting retries (bounded), where the tick's
+# outage-backoff then prevents wasted CPU on subsequent fires.
+RETRY_STATUS = {401, 429, 500, 502, 503, 504}   # transient — back off and retry
 MAX_RETRIES = 4
 BACKOFF_BASE = 1.0               # seconds: 1, 2, 4, 8
 RESULT_WINDOW_CAP = 10000        # Elasticsearch index.max_result_window

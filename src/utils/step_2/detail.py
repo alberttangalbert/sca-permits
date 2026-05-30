@@ -37,7 +37,7 @@ class DetailError(RuntimeError):
 # "An error has occurred." for several minutes. A record that is genuinely
 # restricted (or persistently 500'd) would still error after exhausting retries,
 # so this can't loop forever.
-RETRY_STATUS = {401, 429, 500, 503}   # transient — back off and retry
+RETRY_STATUS = {401, 429, 500, 502, 503, 504}   # transient — back off and retry
 MAX_RETRIES = 4
 BACKOFF_BASE = 1.0          # seconds: 1, 2, 4, 8
 
