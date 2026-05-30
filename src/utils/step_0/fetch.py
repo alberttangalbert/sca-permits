@@ -38,9 +38,13 @@ class SearchError(RuntimeError):
 # "Authorization has been denied" under load even on records/queries it serves
 # anonymously a moment later (confirmed against detail GETs 2026-05-29). Retrying
 # the SAME anonymous request rides through it — no credentials are ever added.
-# Critical here: a transient 401 on a search page would otherwise abort the whole
-# (critical) refresh; this lets the existing backoff absorb it instead.
-RETRY_STATUS = {401, 429, 503}   # transient — back off and retry
+# 500 is added for the same reason: 2026-05-30 03:10 local saw a sustained portal
+# outage returning HTTP 500 "An error has occurred." A brief 500 during a
+# deploy / pool restart self-heals; the retry rides it through and a sustained
+# outage still bubbles up as a SearchError after exhausting retries (bounded).
+# Critical here: a transient 401/500 on a search page would otherwise abort the
+# whole (critical) refresh; this lets the existing backoff absorb it instead.
+RETRY_STATUS = {401, 429, 500, 503}   # transient — back off and retry
 MAX_RETRIES = 4
 BACKOFF_BASE = 1.0               # seconds: 1, 2, 4, 8
 RESULT_WINDOW_CAP = 10000        # Elasticsearch index.max_result_window

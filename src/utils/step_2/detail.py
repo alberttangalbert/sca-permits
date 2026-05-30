@@ -32,10 +32,12 @@ class DetailError(RuntimeError):
 # anonymous, and on 2026-05-29 four consecutive records returned 401
 # ("Authorization has been denied for this request.") mid-backfill yet returned
 # 200 on an immediate re-GET. Retrying the SAME anonymous request rides through
-# the blip — it never adds credentials (we stay anonymous-only). A record that is
-# genuinely restricted would still 401 through all retries and be recorded as an
-# error, so this can't loop forever.
-RETRY_STATUS = {401, 429, 503}   # transient — back off and retry
+# the blip — it never adds credentials (we stay anonymous-only). 500 added for
+# the same reason after a 2026-05-30 portal outage took search down with
+# "An error has occurred." for several minutes. A record that is genuinely
+# restricted (or persistently 500'd) would still error after exhausting retries,
+# so this can't loop forever.
+RETRY_STATUS = {401, 429, 500, 503}   # transient — back off and retry
 MAX_RETRIES = 4
 BACKOFF_BASE = 1.0          # seconds: 1, 2, 4, 8
 

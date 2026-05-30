@@ -263,13 +263,20 @@ def _run_pipeline(args, start_year, end_year, years, since, do_refresh) -> int:
     results: list = []
 
     if do_refresh:
-        # 1. Clear the recent year-window cache so no stale pages survive the re-pull.
-        for d in _window_dirs(years):
-            if d.exists():
-                shutil.rmtree(d)
-                print(f"[tick] cleared stale cache {d.relative_to(ROOT)}")
-
-        # 2. Re-pull recent search windows (fresh statuses + newly-filed permits).
+        # 1. Re-pull recent search windows (fresh statuses + newly-filed permits).
+        #    --no-cache overwrites each page in place via atomic_write_json
+        #    (write-tmp + rename), so the OLD cache stays valid until each new
+        #    page lands. Earlier design rm-treed the dir up front; the portal
+        #    going 500 mid-day (2026-05-30 03:10 local) then stranded the
+        #    cache empty for ~3 ticks until the API recovered. In practice the
+        #    page-count grows monotonically (permits only get ADDED to
+        #    EnerGov), so leaving old pages in place can't corrupt step 1 --
+        #    its INSERT ON CONFLICT dedup means any page-N record present in
+        #    both the new and the old fetch resolves to the LATER write
+        #    (filenames sort by number, so growing pages don't shadow). Stale
+        #    pages that only exist in the old cache would only matter if the
+        #    page count SHRANK; for a city's incremental permit history that
+        #    never happens.
         if run_step(
             "step0: re-pull recent search windows",
             [str(SRC / "step0_fetch_search_results.py"), "--module", MODULE,
