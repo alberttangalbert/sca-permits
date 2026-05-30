@@ -328,6 +328,26 @@ class Contacts(unittest.TestCase):
         self.assertIsNone(picked["contact_role"])
         self.assertIsNone(picked["owner_name"])
 
+    def test_energov_migration_placeholder_filtered(self):
+        # 'EnerGov YYYYQN' is Tyler's migration-era stamp (paired with the
+        # energovconversion@tylertech.com email). 2,371 contacts use this name
+        # spanning 2002-2025 quarters. Filter them so they never surface as a
+        # lead's owner -- the lead falls through to a real contact (if any).
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "EnerGov 2009Q2",
+             "email": "energovconversion2009Q2@tylertech.com", "phone": None},
+            {"role": "ARCHITECT", "full_name": "Real Architect",
+             "email": "arc@x.com", "phone": "555-1234567"}])
+        self.assertEqual(picked["contact_role"], "ARCHITECT")
+        self.assertEqual(picked["owner_name"], "Real Architect")
+        # Also matches a 2024 quarter (the migration stamps keep appearing
+        # on recent sync events too, not just 2002-2010 legacy).
+        picked2 = pick_contacts([
+            {"role": "APPLICANT", "full_name": "EnerGov 2024Q3",
+             "email": "x@x.com", "phone": "555-1111111"}])
+        self.assertIsNone(picked2["owner_name"])
+        self.assertIsNone(picked2["contact_role"])
+
     def test_builder_owner_contractor_is_not_real_competition(self):
         # 'BUILDER OWNER' is the owner-builder stamp (homeowner acting as their
         # own contractor). It's NOT a hired contractor in the way that signals

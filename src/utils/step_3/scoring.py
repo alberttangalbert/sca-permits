@@ -181,17 +181,23 @@ def recency_factor(apply_date: str | None, today: dt.date | None = None) -> floa
 # no real homeowner identity attached: 'void void' is the redacted-applicant
 # placeholder (~65 rows, all unreachable); 'builder owner' is the owner-builder
 # generic stamp (~5,000 rows, almost always with a stock 925-area phone that
-# doesn't route to the homeowner). Surfacing them as `owner_name` on a lead is
-# noise — the GC's call list ends up with "Call void void at [blank]" rows, or
-# "BUILDER OWNER" rows where the phone is a placeholder. Filter at the
-# candidate-pool level so the lead falls through to a real contact if one
-# exists, or becomes properly unreachable (and the WARN healthcheck flags it).
+# doesn't route to the homeowner); 'EnerGov YYYYQN' is the data-migration /
+# sync placeholder (~2,400 rows from 2002 through 2025, paired with the
+# energovconversion@tylertech.com email). Surfacing them as `owner_name` on a
+# lead is noise — the GC's call list ends up with "Call void void at [blank]"
+# rows, "BUILDER OWNER" rows where the phone is a placeholder, or "EnerGov
+# 2024Q3" rows that are just system tokens. Filter at the candidate-pool level
+# so the lead falls through to a real contact if one exists, or becomes
+# properly unreachable (and the WARN healthcheck flags it).
 _PLACEHOLDER_NAMES = {"void void", "builder owner", "test test", "redacted redacted"}
+# Migration-era stamps like 'EnerGov 2009Q2' / 'EnerGov 2024Q4': "energov" +
+# space + 4-digit year + 'q' + quarter digit. Match the lowercased name.
+_ENERGOV_MIGRATION_NAME = re.compile(r"^energov\s+\d{4}q[1-4]$")
 
 
 def _is_placeholder(c: dict) -> bool:
     name = (c.get("full_name") or "").strip().lower()
-    return name in _PLACEHOLDER_NAMES
+    return name in _PLACEHOLDER_NAMES or bool(_ENERGOV_MIGRATION_NAME.match(name))
 
 
 # Source-data hygiene helpers (added 2026-05-29). EnerGov contact rows
