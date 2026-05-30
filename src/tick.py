@@ -114,11 +114,31 @@ def _release_lock() -> None:
         pass
 
 
+# If a refresh fails (e.g. portal sustained 500), don't keep hammering the
+# API every fire -- each failed attempt costs ~3 min of retry timeouts.
+# Wait at least this long before trying again. Bounded so a brief outage
+# self-heals on the next scheduled fire.
+OUTAGE_BACKOFF_MINUTES = 30
+
+
+def _read_state() -> dict:
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
 def _last_success() -> dt.datetime | None:
     try:
-        ts = json.loads(STATE_PATH.read_text())["last_success_at"]
-        return dt.datetime.fromisoformat(ts)
-    except (OSError, ValueError, KeyError):
+        return dt.datetime.fromisoformat(_read_state()["last_success_at"])
+    except (ValueError, KeyError):
+        return None
+
+
+def _last_failure() -> dt.datetime | None:
+    try:
+        return dt.datetime.fromisoformat(_read_state()["last_failure_at"])
+    except (ValueError, KeyError):
         return None
 
 
@@ -127,8 +147,19 @@ def _record_success() -> None:
     # partial JSON blob. _last_success() catches that as ValueError and returns
     # None (graceful: triggers an unscheduled extra refresh next tick), but
     # writing via the tmp+rename helper avoids the broken state entirely.
+    # Also clears last_failure_at so a recovered portal exits outage-backoff.
     now = dt.datetime.now().astimezone().replace(microsecond=0)
-    atomic_write_json(STATE_PATH, {"last_success_at": now.isoformat()})
+    state = _read_state()
+    state["last_success_at"] = now.isoformat()
+    state.pop("last_failure_at", None)
+    atomic_write_json(STATE_PATH, state)
+
+
+def _record_failure() -> None:
+    now = dt.datetime.now().astimezone().replace(microsecond=0)
+    state = _read_state()
+    state["last_failure_at"] = now.isoformat()
+    atomic_write_json(STATE_PATH, state)
 
 
 def _missing_detail_count(since: str | None = None) -> int:
@@ -154,12 +185,25 @@ def _missing_detail_count(since: str | None = None) -> int:
 
 
 def should_refresh(force: bool, last: dt.datetime | None, now: dt.datetime,
-                   min_interval_hours: float) -> bool:
+                   min_interval_hours: float,
+                   last_failure: dt.datetime | None = None,
+                   outage_backoff_minutes: float = OUTAGE_BACKOFF_MINUTES) -> bool:
     """Whether to run the heavy SEARCH re-pull this fire: forced, or no prior
     successful run, or the throttle window has elapsed. Pure (no I/O) so the
     two-cadence gate — the pipeline's one portal-politeness decision — is tested
-    rather than trusted to `or` short-circuiting around a None age."""
-    if force or last is None:
+    rather than trusted to `or` short-circuiting around a None age.
+
+    Outage backoff: if the last refresh attempt FAILED within
+    outage_backoff_minutes (default 30), skip this fire's refresh. Each failed
+    refresh costs ~3 min of retry timeouts; the backoff prevents the tick from
+    burning ~30% of its wall-clock on a sustained portal outage. `force=True`
+    overrides backoff (operator decision wins)."""
+    if force:
+        return True
+    if (last_failure is not None
+            and (now - last_failure).total_seconds() / 60 < outage_backoff_minutes):
+        return False
+    if last is None:
         return True
     return (now - last).total_seconds() / 3600 >= min_interval_hours
 
@@ -205,9 +249,16 @@ def main(args) -> int:
     # DETAIL backfill is different: cheap per-record GETs that chip away at the
     # ~50k un-enriched records, so it runs EVERY fire until complete.
     last = _last_success()
+    last_failure = _last_failure()
     now = dt.datetime.now().astimezone()
     age_h = (now - last).total_seconds() / 3600 if last else None
-    do_refresh = should_refresh(args.force, last, now, args.min_interval_hours)
+    failure_age_min = ((now - last_failure).total_seconds() / 60
+                       if last_failure else None)
+    do_refresh = should_refresh(args.force, last, now, args.min_interval_hours,
+                                last_failure)
+    in_outage_backoff = (not args.force and last_failure is not None
+                         and failure_age_min is not None
+                         and failure_age_min < OUTAGE_BACKOFF_MINUTES)
 
     if args.dry_run:
         print("\n[tick] DRY RUN — plan only, nothing fetched/cleared/written:")
@@ -238,12 +289,22 @@ def main(args) -> int:
     # (default: skip the pre-2020 archival tail — it's never an actionable lead).
     missing = _missing_detail_count(args.backfill_since)
     if should_skip_entirely(do_refresh, args.backfill_chunk, missing):
-        print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h) "
-              f"and backfill complete (missing detail: {missing}); nothing to do.")
+        if in_outage_backoff:
+            print(f"[tick] refresh in outage backoff (last failure {failure_age_min:.1f}min "
+                  f"ago < {OUTAGE_BACKOFF_MINUTES}min) and backfill complete "
+                  f"(missing detail: {missing}); nothing to do.")
+        else:
+            print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h) "
+                  f"and backfill complete (missing detail: {missing}); nothing to do.")
         return 0
     if not do_refresh:
-        print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h); "
-              f"backfill-only pass — {missing} records still lack detail.")
+        if in_outage_backoff:
+            print(f"[tick] refresh in outage backoff (last failure {failure_age_min:.1f}min "
+                  f"ago < {OUTAGE_BACKOFF_MINUTES}min); backfill-only pass — "
+                  f"{missing} records still lack detail.")
+        else:
+            print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h); "
+                  f"backfill-only pass — {missing} records still lack detail.")
 
     # Single-flight: refuse to run while another tick holds the lock.
     if not _acquire_lock():
@@ -256,6 +317,10 @@ def main(args) -> int:
     # (else the every-fire backfill would keep the refresh from ever running).
     if rc == 0 and do_refresh:
         _record_success()
+    elif rc != 0 and do_refresh:
+        # Record refresh failure so the next fire enters outage backoff and
+        # doesn't burn another ~3 min of retry timeouts on a still-down portal.
+        _record_failure()
     return rc
 
 

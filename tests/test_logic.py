@@ -905,6 +905,38 @@ class TickCadence(unittest.TestCase):
         # refreshing -> never skip, regardless of backfill state
         self.assertFalse(should_skip_entirely(True, 0, 0))
 
+    def test_outage_backoff_skips_refresh_after_recent_failure(self):
+        # After a refresh fails (portal 500), the next fire should NOT retry --
+        # each attempt costs ~3 min of retry timeouts. Even if the normal
+        # throttle window has elapsed, the recent failure wins.
+        last_success = self.NOW - dt.timedelta(hours=8)   # throttle elapsed
+        last_failure = self.NOW - dt.timedelta(minutes=5)  # recent failure
+        self.assertFalse(should_refresh(False, last_success, self.NOW, 6.0,
+                                        last_failure=last_failure))
+
+    def test_outage_backoff_clears_after_window_passes(self):
+        # Once the outage-backoff window has elapsed (30 min default), the
+        # normal throttle check takes over. With a normal throttle elapsed,
+        # the refresh runs again.
+        last_success = self.NOW - dt.timedelta(hours=8)
+        last_failure = self.NOW - dt.timedelta(minutes=45)  # > 30 min
+        self.assertTrue(should_refresh(False, last_success, self.NOW, 6.0,
+                                       last_failure=last_failure))
+
+    def test_force_overrides_outage_backoff(self):
+        # An operator using --force always wins over backoff -- they're
+        # explicitly asking to retry.
+        last_failure = self.NOW - dt.timedelta(minutes=2)
+        self.assertTrue(should_refresh(True, None, self.NOW, 6.0,
+                                       last_failure=last_failure))
+
+    def test_no_outage_backoff_when_no_recent_failure(self):
+        # With no failure on record, the function behaves exactly like before
+        # (no regression on the existing throttle logic).
+        recent_success = self.NOW - dt.timedelta(hours=2)
+        self.assertFalse(should_refresh(False, recent_success, self.NOW, 6.0,
+                                        last_failure=None))
+
 
 if __name__ == "__main__":
     unittest.main()
