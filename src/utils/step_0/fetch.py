@@ -181,5 +181,12 @@ def fetch_all(module_label: str, filter_module: int, sort_by: str,
     finally:
         session.close()
     audit["duration_seconds"] = round(time.monotonic() - started, 1)
-    audit["reconciled"] = (audit["sum_window_counts"] == audit["global_total"])
+    # full_coverage: did we ask the API about EVERY permit in the portal?
+    # True only for a complete-history backfill that includes the global total.
+    audit["full_coverage"] = (audit["sum_window_counts"] == audit["global_total"])
+    # reconciled: of the records the API SAID exist in the windows we asked
+    # about, did we actually receive them all? This is the integrity check
+    # that matters for both partial refreshes (e.g. the throttled tick's 2y
+    # window) and full backfills -- 'False' here is a real anomaly to chase.
+    audit["reconciled"] = (audit["records_seen"] == audit["sum_window_counts"])
     return audit

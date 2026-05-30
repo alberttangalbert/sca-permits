@@ -71,15 +71,24 @@ def main(module: str, start_year: int, end_year: int, page_size: int,
     print(f"[{run_id}] complete in {audit['duration_seconds']}s")
     print(f"  global total:   {audit['global_total']}")
     print(f"  sum of windows: {audit['sum_window_counts']}  "
-          f"reconciled: {audit['reconciled']}")
+          f"full coverage: {audit['full_coverage']}")
     print(f"  windows:        {len(audit['windows'])}")
     print(f"  pages fetched:  {audit['pages_fetched']}")
     print(f"  pages skipped:  {audit['pages_skipped']} (already cached)")
-    print(f"  records seen:   {audit['records_seen']}")
+    print(f"  records seen:   {audit['records_seen']}  "
+          f"reconciled: {audit['reconciled']}")
     print(f"  errors:         {len(audit['errors'])}")
     if not audit["reconciled"]:
-        print(f"  [warn] sum of window counts != global total — "
-              f"some records may be outside {start_year}..{end_year}")
+        # records_seen != sum_window_counts -- the API said N records exist in
+        # our windows but we didn't fetch N of them. Real anomaly to chase.
+        print(f"  [warn] records_seen ({audit['records_seen']}) != "
+              f"sum_window_counts ({audit['sum_window_counts']}) — "
+              f"fewer records returned than promised; check window-page errors")
+    if not audit["full_coverage"]:
+        # Expected behavior for partial refreshes -- informational only.
+        print(f"  [note] partial coverage: pulled {audit['sum_window_counts']} "
+              f"of {audit['global_total']} permits "
+              f"(outside year range {start_year}..{end_year})")
 
     runs = load_json(runs_json_for(module), {"schema_version": 1, "runs": []})
     runs["runs"].append({
