@@ -60,7 +60,7 @@ MODULE = "Permit"
 RAW_SUBDIR = "permit"  # MODULES["Permit"]["raw_subdir"]
 
 sys.path.insert(0, str(SRC))
-from utils.io import DB_PATH, connect  # noqa: E402  (after SRC is on the path)
+from utils.io import DB_PATH, atomic_write_json, connect  # noqa: E402  (after SRC is on the path)
 
 # A successful tick re-pulls 2 years of search from the live Tyler host, so we
 # guard against (a) two ticks running at once and (b) hammering the portal when a
@@ -123,8 +123,12 @@ def _last_success() -> dt.datetime | None:
 
 
 def _record_success() -> None:
+    # Atomic write: a kill mid-write would otherwise leave STATE_PATH as a
+    # partial JSON blob. _last_success() catches that as ValueError and returns
+    # None (graceful: triggers an unscheduled extra refresh next tick), but
+    # writing via the tmp+rename helper avoids the broken state entirely.
     now = dt.datetime.now().astimezone().replace(microsecond=0)
-    STATE_PATH.write_text(json.dumps({"last_success_at": now.isoformat()}) + "\n")
+    atomic_write_json(STATE_PATH, {"last_success_at": now.isoformat()})
 
 
 def _missing_detail_count(since: str | None = None) -> int:
