@@ -170,10 +170,19 @@ def fetch_all(module_label: str, filter_module: int, sort_by: str,
         "records_seen": 0, "errors": [],
     }
     try:
-        audit["global_total"] = count_window(session, filter_module, sort_by,
-                                             None, None)
-        log(f"  global TotalFound={audit['global_total']}; "
-            f"chunking ApplyDate years {start_year}..{end_year}")
+        # The global count is "nice to have" — it's only used for the
+        # full_coverage reconciliation flag. If the portal is sustained-500
+        # on the global query (observed 2026-05-30) but might still answer
+        # year-windowed queries, we shouldn't abort the whole refresh on
+        # this. Record the error in the audit and proceed to the windows.
+        try:
+            audit["global_total"] = count_window(session, filter_module,
+                                                 sort_by, None, None)
+            log(f"  global TotalFound={audit['global_total']}; "
+                f"chunking ApplyDate years {start_year}..{end_year}")
+        except SearchError as exc:
+            audit["errors"].append({"phase": "global_count", "error": str(exc)})
+            log(f"  [global count] ERROR: {exc}; continuing with year windows")
         for year in range(start_year, end_year + 1):
             try:
                 _fetch_window(session, filter_module, sort_by,
