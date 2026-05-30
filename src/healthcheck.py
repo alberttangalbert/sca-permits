@@ -77,6 +77,16 @@ COUNT_CHECKS = [
      "SELECT COUNT(*) FROM sca_leads WHERE lead_band IN ('HIGH','MEDIUM') "
      "AND (owner_email IS NULL OR owner_email='') "
      "AND (owner_phone IS NULL OR owner_phone='')"),
+    # The cluster-level mirror: this is what the GC's deduped call list
+    # actually looks at, and aggregate() can mine contact from older sibling
+    # permits at the same parcel (e.g. BLD2024-00329's contactless 2024 TRS
+    # owner gets the 2007-era LYNCH ROBERT phone from a sibling). When the
+    # cluster export is fully reachable, the lead-level WARN doesn't translate
+    # to a real operational gap. Tracking both side-by-side makes that visible.
+    ("WARN", "clusters: actionable (HIGH/MEDIUM) clusters have a reachable contact",
+     "SELECT COUNT(*) FROM sca_lead_clusters WHERE top_band IN ('HIGH','MEDIUM') "
+     "AND (owner_email IS NULL OR owner_email='') "
+     "AND (owner_phone IS NULL OR owner_phone='')"),
     # Invariant: any lead with surfaced owner contact info MUST have a
     # contact_role labeling its provenance — otherwise the UI can't honestly
     # render "Name (Role)" and would silently default to "Owner" on what may
