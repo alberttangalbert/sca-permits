@@ -59,18 +59,28 @@ def fetch_one(session: requests.Session, case_id: str) -> dict:
             last = exc
         else:
             if r.status_code == 200:
-                payload = r.json()
-                if not payload.get("Success", True):
-                    raise DetailError(f"{case_id}: Success=false "
-                                      f"err={str(payload.get('ErrorMessage'))[:200]!r}")
-                result = payload.get("Result")
-                if result is None:
-                    raise DetailError(f"{case_id}: no Result envelope")
-                return result
-            if r.status_code not in RETRY_STATUS:
+                try:
+                    payload = r.json()
+                except ValueError as exc:
+                    # A 200 with a non-JSON body (truncated response / HTML error
+                    # page from the flaky IIS host) is a transient blip, not a
+                    # permanent failure. Retry it like a 5xx -- letting the
+                    # ValueError escape would crash the whole backfill, since
+                    # fetch_details only catches DetailError, not ValueError.
+                    last = DetailError(f"HTTP 200 unparseable body: {str(exc)[:80]}")
+                else:
+                    if not payload.get("Success", True):
+                        raise DetailError(f"{case_id}: Success=false "
+                                          f"err={str(payload.get('ErrorMessage'))[:200]!r}")
+                    result = payload.get("Result")
+                    if result is None:
+                        raise DetailError(f"{case_id}: no Result envelope")
+                    return result
+            elif r.status_code not in RETRY_STATUS:
                 raise DetailError(f"{case_id}: HTTP {r.status_code} "
                                   f"body={r.text[:160]!r}")
-            last = DetailError(f"HTTP {r.status_code}")
+            else:
+                last = DetailError(f"HTTP {r.status_code}")
         if attempt < MAX_RETRIES:
             time.sleep(BACKOFF_BASE * (2 ** attempt))
     raise DetailError(f"{case_id}: exhausted retries ({last})")

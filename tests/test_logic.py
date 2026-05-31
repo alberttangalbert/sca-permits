@@ -842,6 +842,16 @@ class _FakeResp:
         return self._payload
 
 
+class _BadJsonResp:
+    """A 200 response whose body isn't valid JSON: .json() raises ValueError,
+    mirroring requests' JSONDecodeError (a ValueError subclass)."""
+    status_code = 200
+    text = "<html>error</html>"
+
+    def json(self):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
 class _FakeSession:
     """Returns a scripted sequence of responses, one per .get() call."""
     def __init__(self, responses):
@@ -885,6 +895,29 @@ class DetailFetchRetry(unittest.TestCase):
         with self.assertRaises(detailmod.DetailError):
             detailmod.fetch_one(sess, "case-z")
         self.assertEqual(sess.calls, detailmod.MAX_RETRIES + 1)  # bounded, no infinite loop
+
+    def test_200_with_unparseable_body_is_retried(self):
+        # A 200 whose body isn't JSON (truncated / HTML error page from the
+        # flaky IIS host) is a transient blip -> retry, not a crash. r.json()
+        # lives in the try/except's else-clause, so a ValueError here would
+        # otherwise escape fetch_one uncaught and kill the whole backfill.
+        sess = _FakeSession([
+            _BadJsonResp(),
+            _FakeResp(200, {"Success": True, "Result": {"ok": 2}}),
+        ])
+        result = detailmod.fetch_one(sess, "case-bad")
+        self.assertEqual(result, {"ok": 2})
+        self.assertEqual(sess.calls, 2)
+
+    def test_persistent_unparseable_200_raises_detailerror(self):
+        # After exhausting retries it must raise DetailError (which
+        # fetch_details catches + skips), NOT a bare ValueError (which it
+        # doesn't catch -> backfill crash). Bounded, no infinite loop.
+        sess = _FakeSession([_BadJsonResp()
+                             for _ in range(detailmod.MAX_RETRIES + 1)])
+        with self.assertRaises(detailmod.DetailError):
+            detailmod.fetch_one(sess, "case-bad2")
+        self.assertEqual(sess.calls, detailmod.MAX_RETRIES + 1)
 
 
 class UnparsedFiles(unittest.TestCase):
