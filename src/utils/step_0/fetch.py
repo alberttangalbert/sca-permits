@@ -26,7 +26,7 @@ import requests
 
 from utils.auth import search_headers
 from utils.config import DEFAULT_PAGE_SIZE, SEARCH_URL, build_search_body
-from utils.io import atomic_write_json
+from utils.io import atomic_write_json, load_json
 
 
 class SearchError(RuntimeError):
@@ -139,6 +139,18 @@ def _fetch_window(session, filter_module, sort_by, d0, d1, raw_dir, page_size,
         dest = win_dir / f"page_{p:03d}.json"
         if dest.exists() and not no_cache:
             audit["pages_skipped"] += 1
+            # Count the cached page's records too, so `reconciled`
+            # (records_seen == sum_window_counts) stays meaningful on a warm
+            # cache. Without this a plain re-run over cached pages always trips
+            # the "records_seen != sum_window_counts" anomaly warning even
+            # though every promised record is already on disk. An unreadable
+            # cache file is left uncounted, so reconciliation correctly flags it.
+            try:
+                cached = load_json(dest, None)
+            except (OSError, ValueError):
+                cached = None
+            if cached is not None:
+                audit["records_seen"] += len(cached.get("EntityResults") or [])
             continue
         body = build_search_body(filter_module, p, page_size, sort_by=sort_by,
                                  search_module=SEARCH_MODULE_MODULE_SPECIFIC,
