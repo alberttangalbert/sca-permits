@@ -67,17 +67,28 @@ def _request(session: requests.Session, body: dict, what: str) -> dict:
             last = exc
         else:
             if r.status_code == 200:
-                payload = r.json()
-                if not payload.get("Success", True):
-                    raise SearchError(f"{what}: Success=false "
-                                      f"err={str(payload.get('ErrorMessage'))[:200]!r}")
-                result = payload.get("Result")
-                if result is None:
-                    raise SearchError(f"{what}: no Result envelope")
-                return result
-            if r.status_code not in RETRY_STATUS:
+                try:
+                    payload = r.json()
+                except ValueError as exc:
+                    # A 200 with a non-JSON body (truncated / HTML error page
+                    # from the flaky IIS host) is a transient blip -> retry like
+                    # a 5xx rather than letting the ValueError escape _request
+                    # and abort step0 (critical=True -> whole tick aborts + a
+                    # spurious outage backoff). The whole point of this loop is
+                    # to ride through blips; an unparseable 200 is one.
+                    last = SearchError(f"HTTP 200 unparseable body: {str(exc)[:80]}")
+                else:
+                    if not payload.get("Success", True):
+                        raise SearchError(f"{what}: Success=false "
+                                          f"err={str(payload.get('ErrorMessage'))[:200]!r}")
+                    result = payload.get("Result")
+                    if result is None:
+                        raise SearchError(f"{what}: no Result envelope")
+                    return result
+            elif r.status_code not in RETRY_STATUS:
                 raise SearchError(f"{what}: HTTP {r.status_code} body={r.text[:200]!r}")
-            last = SearchError(f"HTTP {r.status_code}")
+            else:
+                last = SearchError(f"HTTP {r.status_code}")
         if attempt < MAX_RETRIES:
             time.sleep(BACKOFF_BASE * (2 ** attempt))
     raise SearchError(f"{what}: exhausted retries ({last})")

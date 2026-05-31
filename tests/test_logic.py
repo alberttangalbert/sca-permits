@@ -1097,5 +1097,45 @@ class SearchCacheReconciliation(unittest.TestCase):
             self.assertNotEqual(audit["records_seen"], audit["sum_window_counts"])
 
 
+class _ScriptedPostSession:
+    """Returns a scripted sequence of responses, one per .post() call."""
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def post(self, url, json=None, timeout=None):
+        self.calls += 1
+        return self._responses.pop(0)
+
+
+class SearchRequestRetry(unittest.TestCase):
+    """_request must ride through a 200 with a non-JSON body (the same blip
+    class as detail.py): retry rather than let a ValueError escape and abort
+    step0 (critical=True -> whole tick aborts + a spurious outage backoff)."""
+
+    def setUp(self):
+        self._sleep = fetchmod.time.sleep
+        fetchmod.time.sleep = lambda *_: None
+
+    def tearDown(self):
+        fetchmod.time.sleep = self._sleep
+
+    def test_200_unparseable_body_is_retried(self):
+        sess = _ScriptedPostSession([
+            _BadJsonResp(),
+            _FakeResp(200, {"Success": True, "Result": {"TotalFound": 7}}),
+        ])
+        result = fetchmod._request(sess, {}, "count")
+        self.assertEqual(result, {"TotalFound": 7})
+        self.assertEqual(sess.calls, 2)
+
+    def test_persistent_unparseable_200_raises_searcherror(self):
+        sess = _ScriptedPostSession(
+            [_BadJsonResp() for _ in range(fetchmod.MAX_RETRIES + 1)])
+        with self.assertRaises(fetchmod.SearchError):
+            fetchmod._request(sess, {}, "count")
+        self.assertEqual(sess.calls, fetchmod.MAX_RETRIES + 1)
+
+
 if __name__ == "__main__":
     unittest.main()
