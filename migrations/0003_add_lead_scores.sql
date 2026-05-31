@@ -3,7 +3,9 @@
 -- One row per scored case_id. Scoring is a multiplicative gates×factors model
 -- (the cu-permits architecture, re-derived for San Carlos's real vocabulary):
 --
---   lead_score = 100 · type_fit · size_factor · status_factor · contractor_factor
+--   lead_score = type_fit · size_factor · status_factor · contractor_factor
+--                · hold_factor · recency_factor   (hold/recency added in 0004/0006)
+--   The score is the pure product of the 0-1 factors, so it lives in [0, 1].
 --
 --   * type_fit         — project-type desirability for a residential GC
 --                        (new SFR / ADU / addition = high; sub-trades ≈ 0).
@@ -21,7 +23,7 @@ CREATE TABLE IF NOT EXISTS sca_leads (
     case_id            TEXT PRIMARY KEY
                          REFERENCES sca_permits(case_id) ON DELETE CASCADE,
 
-    lead_score         REAL,        -- 0..100 (the four factors × 100)
+    lead_score         REAL,        -- [0,1] (pure product of the 0-1 factors)
     lead_band          TEXT,        -- HIGH / MEDIUM / LOW / DROP
     category           TEXT,        -- NEW_SFR/ADU/ADDITION/REMODEL/SUBTRADE/COMMERCIAL/OTHER
 

@@ -92,9 +92,12 @@ A multiplicative **gates × factors** model (the cu-permits architecture,
 re-derived for San Carlos's real type/status vocabulary):
 
 ```
-lead_score = 100 · type_fit · size_factor · status_factor
+lead_score = type_fit · size_factor · status_factor
                  · contractor_factor · hold_factor · recency_factor
 ```
+
+The score is the pure product of the six 0–1 factors, so it lives in `[0, 1]`
+(the canonical range shared with the sibling cities).
 
 - **`type_fit`** (`src/utils/step_3/type_fit_rules.json`) — ordered substring
   match on `case_type`: new SFR / ADU / second-unit = 1.0, addition = 0.9,
@@ -116,7 +119,7 @@ lead_score = 100 · type_fit · size_factor · status_factor
   2-3y 0.55 / 3-5y 0.3 / >5y 0.1). Demotes migrated pre-cutover records frozen
   at `Approved` (28% of the actionable funnel was >5y dead before this).
 
-Banded `HIGH ≥ 50`, `MEDIUM ≥ 22`, `LOW ≥ 7`, else `DROP`. Results land in
+Banded `HIGH ≥ 0.50`, `MEDIUM ≥ 0.22`, `LOW ≥ 0.07`, else `DROP`. Results land in
 `sca_leads` with the best owner/contractor contact denormalized for outreach.
 Re-scoring is a seconds-long re-run (`--rebuild`), never a re-fetch.
 
@@ -168,7 +171,7 @@ python3 src/step2_parse_details.py                           # parse ALL cached 
 python3 src/step2_parse_details.py --missing-only            # parse only un-parsed files (incremental; what the tick uses)
 
 # Step 3 — score enriched permits into banded leads (no scraping; safe to re-run).
-python3 src/step3_score.py --rebuild                         # score everything enriched
+python3 src/step3_score.py --rebuild                         # score everything enriched (then re-run step3b — see below)
 python3 src/step3_score.py --dry-run                         # report band/category mix, no writes
 
 # Step 3b — cluster scored leads into one-row-per-project (the deduped call list).
