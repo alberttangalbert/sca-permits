@@ -3,8 +3,12 @@
 Multiplicative gates×factors model (the cu-permits architecture, re-derived for
 San Carlos's real vocabulary):
 
-    lead_score = 100 · type_fit · size_factor · status_factor · contractor_factor
+    lead_score = type_fit · size_factor · status_factor · contractor_factor
                      · hold_factor · recency_factor
+
+(normalized to [0, 1] — a pure product of the six 0-1 factors, sharing the
+canonical range used by the sibling cities fr/sj. Bands: HIGH 0.50 / MEDIUM
+0.22 / LOW 0.07.)
 
 type_fit comes from `type_fit_rules.json` (ordered substring match on case_type,
 with a description-keyword upgrade for the otherwise-uninformative misc/unknown
@@ -79,7 +83,7 @@ _DESC_UPGRADES = [
     (("remodel", "renovation"), 0.6, "REMODEL"),
 ]
 
-BANDS = (("HIGH", 50.0), ("MEDIUM", 22.0), ("LOW", 7.0))  # else DROP
+BANDS = (("HIGH", 0.50), ("MEDIUM", 0.22), ("LOW", 0.07))  # else DROP
 
 
 def classify_type(case_type: str | None, description: str | None) -> tuple[float, str]:
@@ -338,7 +342,11 @@ def score_record(case_type, case_status, description, valuation, contacts, *,
     hold_factor = 0.9 if blocking else 1.0
     rf = recency_factor(apply_date, today)
 
-    score = round(100 * type_fit * sf * stf * contractor_factor * hold_factor * rf, 1)
+    # Normalized [0, 1] lead score: a pure product of the six 0-1 factors (no
+    # ×100 scaling), so it shares the canonical range used by the sibling cities
+    # (fr/sj). Bands rescaled accordingly (0.50/0.22/0.07). Rounded to 4 dp
+    # because the product of six sub-1 factors can be small.
+    score = round(type_fit * sf * stf * contractor_factor * hold_factor * rf, 4)
     # Negative or zero valuations are EnerGov source-data errors (3 records on
     # 2026-05-29: water-heater permits with valuation -$11 / -$9 / -$1). size_factor
     # already treats <=0 as neutral; null the field on the lead row too so D1

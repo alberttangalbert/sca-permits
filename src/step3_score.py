@@ -133,7 +133,7 @@ def main(args) -> int:
         if args.dry_run:
             print("  DRY RUN — not writing to DB. Top 10 by score:")
             for r in sorted(rows, key=lambda x: x["lead_score"], reverse=True)[:10]:
-                print(f"    {r['lead_score']:5.1f} {r['lead_band']:6} {r['category']:10} "
+                print(f"    {r['lead_score']:6.4f} {r['lead_band']:6} {r['category']:10} "
                       f"val={r['valuation']} {r['status_bucket']}")
             return 0
 
@@ -151,6 +151,17 @@ def main(args) -> int:
 
     finished = dt.datetime.now().astimezone().replace(microsecond=0)
     print(f"  leads in table: {after}  (+{after - before} new)")
+    if args.rebuild:
+        # --rebuild DELETEs + re-INSERTs every lead; cluster_id is not a
+        # LEAD_COLUMN, so all leads come back with cluster_id NULL while
+        # sca_lead_clusters still holds the (now-stale) old rows. Until step3b
+        # re-runs, healthcheck reports several confusing cluster FAILs that look
+        # like corruption but only mean "clustering hasn't caught up." The tick
+        # always runs step3b next; a standalone --rebuild must too.
+        print("  NOTE: --rebuild reset cluster_id on every lead and left "
+              "sca_lead_clusters stale.\n        Run step3b_cluster.py next to "
+              "rebuild it (healthcheck will report cluster\n        mismatches "
+              "until you do).")
 
     runs = load_json(score_runs_json_for(module), {"schema_version": 1, "runs": []})
     runs["runs"].append({

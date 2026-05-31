@@ -40,9 +40,9 @@ COUNT_CHECKS = [
     ("FAIL", "leads: every lead has a detail row",
      "SELECT COUNT(*) FROM sca_leads l "
      "LEFT JOIN sca_permit_detail d USING(case_id) WHERE d.case_id IS NULL"),
-    ("FAIL", "leads: lead_score within [0,100]",
+    ("FAIL", "leads: lead_score within [0,1]",
      "SELECT COUNT(*) FROM sca_leads "
-     "WHERE lead_score IS NULL OR lead_score < 0 OR lead_score > 100"),
+     "WHERE lead_score IS NULL OR lead_score < 0 OR lead_score > 1"),
     ("FAIL", "leads: lead_band in valid set",
      "SELECT COUNT(*) FROM sca_leads "
      "WHERE lead_band NOT IN ('HIGH','MEDIUM','LOW','DROP')"),

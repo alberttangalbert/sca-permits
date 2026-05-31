@@ -9,6 +9,7 @@ in the decisions that matter — especially the hard-won bug guards:
 Run:  python3 -m unittest discover -s tests   (or: python3 -m unittest tests.test_logic)
 """
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -32,6 +33,7 @@ from step2_parse_details import unparsed_files
 from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUSTERS_SPEC
 from tick import should_refresh, should_skip_entirely
 from utils.step_2 import detail as detailmod
+from utils.step_0 import fetch as fetchmod
 
 
 class TypeFit(unittest.TestCase):
@@ -156,12 +158,12 @@ class Factors(unittest.TestCase):
         self.assertEqual(scored["status_bucket"], "COMPLETE")
 
     def test_band_boundaries(self):
-        self.assertEqual(band(50), "HIGH")
-        self.assertEqual(band(49.9), "MEDIUM")
-        self.assertEqual(band(22), "MEDIUM")
-        self.assertEqual(band(21.9), "LOW")
-        self.assertEqual(band(7), "LOW")
-        self.assertEqual(band(6.9), "DROP")
+        self.assertEqual(band(0.50), "HIGH")
+        self.assertEqual(band(0.499), "MEDIUM")
+        self.assertEqual(band(0.22), "MEDIUM")
+        self.assertEqual(band(0.219), "LOW")
+        self.assertEqual(band(0.07), "LOW")
+        self.assertEqual(band(0.069), "DROP")
 
 
 class Contacts(unittest.TestCase):
@@ -371,13 +373,13 @@ class ScoreRecord(unittest.TestCase):
                     contacts=[{"role": "OWNER", "full_name": "O", "email": "o@x",
                                "phone": "1"}])
         clean = score_record(**base)
-        self.assertEqual(clean["lead_score"], 100.0)        # 1*1*1*1
+        self.assertEqual(clean["lead_score"], 1.0)          # 1*1*1*1 (normalized [0,1])
         self.assertEqual(clean["lead_band"], "HIGH")
         # A contractor present and a blocking hold each shave the score.
         withc = score_record(**{**base, "contacts": [
             {"role": "CONTRACTOR", "company": "C"}]}, blocking_hold_count=1)
         self.assertEqual(withc["blocking_hold"], 1)
-        self.assertAlmostEqual(withc["lead_score"], 100 * 0.8 * 0.9, places=4)
+        self.assertAlmostEqual(withc["lead_score"], 0.8 * 0.9, places=4)
 
     def test_recency_decays_stale_migrated_permit(self):
         # Same approved new-SFR, scored fresh vs. 20 years stale: fresh stays HIGH,
@@ -391,7 +393,7 @@ class ScoreRecord(unittest.TestCase):
         self.assertEqual(fresh["lead_band"], "HIGH")
         stale = score_record(**base, apply_date="2004-04-01", today=today)
         self.assertEqual(stale["recency_factor"], 0.1)
-        self.assertEqual(stale["lead_score"], 10.0)   # 100 * 0.1
+        self.assertEqual(stale["lead_score"], 0.1)    # 1.0 * 0.1 (normalized [0,1])
         self.assertEqual(stale["lead_band"], "LOW")   # out of HIGH/MEDIUM
 
 
@@ -475,11 +477,11 @@ class Clustering(unittest.TestCase):
         # was being overridden by an HVAC sub-trade permit's APPLICANT (Valley
         # Heating). With the anchor reachable, anchor wins.
         members = [
-            {"case_id": "anchor", "lead_score": 100.0, "owner_name": "SFR Owner",
+            {"case_id": "anchor", "lead_score": 0.9, "owner_name": "SFR Owner",
              "owner_email": "sfr@x.com", "owner_phone": None,
              "contact_role": "OWNER",
              "main_parcel": "P1", "apply_date": "2026-03-01"},
-            {"case_id": "subtrade", "lead_score": 3.0, "owner_name": "HVAC Co",
+            {"case_id": "subtrade", "lead_score": 0.03, "owner_name": "HVAC Co",
              "owner_email": "hvac@x.com", "owner_phone": "555-1234567",
              "contact_role": "APPLICANT",
              "main_parcel": "P1", "apply_date": "2026-04-01"},
@@ -494,10 +496,10 @@ class Clustering(unittest.TestCase):
         # (no email AND no phone). This is the original case the fall-through
         # was designed for -- preserve it.
         members = [
-            {"case_id": "anchor", "lead_score": 100.0, "owner_name": "Contactless",
+            {"case_id": "anchor", "lead_score": 0.9, "owner_name": "Contactless",
              "owner_email": None, "owner_phone": None, "contact_role": "OWNER",
              "main_parcel": "P1", "apply_date": "2026-03-01"},
-            {"case_id": "sibling", "lead_score": 30.0, "owner_name": "Reachable",
+            {"case_id": "sibling", "lead_score": 0.3, "owner_name": "Reachable",
              "owner_email": "r@x.com", "owner_phone": "555-1234567",
              "contact_role": "APPLICANT",
              "main_parcel": "P1", "apply_date": "2026-04-01"},
@@ -516,7 +518,7 @@ class Clustering(unittest.TestCase):
             {"case_id": "a", "lead_score": 50.0, "owner_name": "Owner A",
              "owner_email": None, "owner_phone": None, "contact_role": "OWNER",
              "main_parcel": "P1", "apply_date": "2025-01-01"},
-            {"case_id": "b", "lead_score": 30.0, "owner_name": "Architect B",
+            {"case_id": "b", "lead_score": 0.3, "owner_name": "Architect B",
              "owner_email": "arc@x.com", "owner_phone": "555",
              "contact_role": "ARCHITECT",
              "main_parcel": "P1", "apply_date": "2025-03-01"},
@@ -936,6 +938,74 @@ class TickCadence(unittest.TestCase):
         recent_success = self.NOW - dt.timedelta(hours=2)
         self.assertFalse(should_refresh(False, recent_success, self.NOW, 6.0,
                                         last_failure=None))
+
+
+class _FakePostSession:
+    """Answers the count query (PageSize 1) with a fixed TotalFound; never
+    needs to serve a page because the test pre-populates the cache."""
+    def __init__(self, total):
+        self.total = total
+        self.posts = 0
+
+    def post(self, url, json=None, timeout=None):
+        self.posts += 1
+        return _FakeResp(200, {"Success": True,
+                               "Result": {"TotalFound": self.total,
+                                          "EntityResults": []}})
+
+
+class SearchCacheReconciliation(unittest.TestCase):
+    """A warm-cache re-run must still reconcile. The cache-skip branch counts
+    each cached page's records toward records_seen; otherwise `reconciled`
+    (records_seen == sum_window_counts) is permanently False on any re-run over
+    cached pages, raising a false 'records_seen != sum_window_counts' anomaly
+    warning even though every promised record is already on disk."""
+
+    def _audit(self):
+        return {"windows": [], "sum_window_counts": 0, "pages_fetched": 0,
+                "pages_skipped": 0, "records_seen": 0, "errors": []}
+
+    def test_cached_pages_count_toward_records_seen(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            raw_dir = Path(td)
+            wd = raw_dir / "2026"          # full-year window -> _label() == "2026"
+            wd.mkdir()
+            # count=3, page_size=2 -> 2 pages (2 + 1 records), both pre-cached.
+            (wd / "page_001.json").write_text(
+                json.dumps({"EntityResults": [{"CaseId": "a"}, {"CaseId": "b"}]}))
+            (wd / "page_002.json").write_text(
+                json.dumps({"EntityResults": [{"CaseId": "c"}]}))
+            sess = _FakePostSession(total=3)
+            audit = self._audit()
+            fetchmod._fetch_window(sess, 2, "ApplyDate",
+                                   dt.date(2026, 1, 1), dt.date(2026, 12, 31),
+                                   raw_dir, 2, 0.0, False, audit, lambda *_: None)
+            self.assertEqual(audit["pages_skipped"], 2)
+            self.assertEqual(audit["pages_fetched"], 0)   # nothing re-fetched
+            self.assertEqual(audit["sum_window_counts"], 3)
+            self.assertEqual(audit["records_seen"], 3)    # cached pages counted
+            # the reconciliation the entrypoint computes is now True on warm cache
+            self.assertEqual(audit["records_seen"], audit["sum_window_counts"])
+
+    def test_unreadable_cached_page_left_uncounted(self):
+        # A corrupt cache file is tolerated (no crash) but stays uncounted, so
+        # reconciliation correctly flags the gap rather than masking it.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            raw_dir = Path(td)
+            wd = raw_dir / "2026"
+            wd.mkdir()
+            (wd / "page_001.json").write_text(
+                json.dumps({"EntityResults": [{"CaseId": "a"}, {"CaseId": "b"}]}))
+            (wd / "page_002.json").write_text("{not valid json")
+            sess = _FakePostSession(total=3)
+            audit = self._audit()
+            fetchmod._fetch_window(sess, 2, "ApplyDate",
+                                   dt.date(2026, 1, 1), dt.date(2026, 12, 31),
+                                   raw_dir, 2, 0.0, False, audit, lambda *_: None)
+            self.assertEqual(audit["records_seen"], 2)         # only the good page
+            self.assertNotEqual(audit["records_seen"], audit["sum_window_counts"])
 
 
 if __name__ == "__main__":

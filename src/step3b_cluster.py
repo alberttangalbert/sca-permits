@@ -134,7 +134,7 @@ def main(args) -> int:
             multi = sorted((s for s in summaries if s["permit_count"] > 1),
                            key=lambda s: (s["max_lead_score"] or 0), reverse=True)[:8]
             for s in multi:
-                print(f"    {s['max_lead_score']:5.1f} {s['top_band']:6} "
+                print(f"    {s['max_lead_score']:6.4f} {s['top_band']:6} "
                       f"x{s['permit_count']} {str(s['address_display'])[:30]:30} "
                       f"[{s['categories']}]")
             return 0
