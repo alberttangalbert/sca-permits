@@ -391,7 +391,9 @@ def _run_pipeline(args, start_year, end_year, years, since, do_refresh) -> int:
     # 6. Re-score everything (cheap; new permits + changed statuses).
     if run_step(
         "step3: score -> sca_leads",
-        [str(SRC / "step3_score.py"), "--rebuild"],
+        # --no-cluster-note: step3b runs immediately below (step 6b), so the
+        # standalone "run step3b next" note would be misleading noise here.
+        [str(SRC / "step3_score.py"), "--rebuild", "--no-cluster-note"],
         critical=True, results=results) != 0:
         return _summary(results, 2)
 

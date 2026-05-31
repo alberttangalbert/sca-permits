@@ -151,13 +151,14 @@ def main(args) -> int:
 
     finished = dt.datetime.now().astimezone().replace(microsecond=0)
     print(f"  leads in table: {after}  (+{after - before} new)")
-    if args.rebuild:
+    if args.rebuild and not args.no_cluster_note:
         # --rebuild DELETEs + re-INSERTs every lead; cluster_id is not a
         # LEAD_COLUMN, so all leads come back with cluster_id NULL while
         # sca_lead_clusters still holds the (now-stale) old rows. Until step3b
         # re-runs, healthcheck reports several confusing cluster FAILs that look
-        # like corruption but only mean "clustering hasn't caught up." The tick
-        # always runs step3b next; a standalone --rebuild must too.
+        # like corruption but only mean "clustering hasn't caught up." A
+        # standalone --rebuild must run step3b next; the tick already does, so
+        # it passes --no-cluster-note to suppress this otherwise-misleading line.
         print("  NOTE: --rebuild reset cluster_id on every lead and left "
               "sca_lead_clusters stale.\n        Run step3b_cluster.py next to "
               "rebuild it (healthcheck will report cluster\n        mismatches "
@@ -185,6 +186,9 @@ if __name__ == "__main__":
     p.add_argument("--module", default="Permit", choices=sorted(MODULES))
     p.add_argument("--rebuild", action="store_true",
                    help="DELETE all sca_leads before scoring (clean rebuild).")
+    p.add_argument("--no-cluster-note", action="store_true",
+                   help="Suppress the post-rebuild 'run step3b next' note "
+                        "(for callers like tick.py that always run step3b next).")
     p.add_argument("--since", help="Only records with apply_date >= this (ISO date).")
     p.add_argument("--start-year", type=int, help="Only apply_date year >= this.")
     p.add_argument("--end-year", type=int, help="Only apply_date year <= this.")
