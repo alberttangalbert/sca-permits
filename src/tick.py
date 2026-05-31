@@ -215,6 +215,28 @@ def should_skip_entirely(do_refresh: bool, backfill_chunk: int,
     return (not do_refresh) and (backfill_chunk <= 0 or missing <= 0)
 
 
+def refresh_state_action(fetch_ok: bool | None) -> str:
+    """Decide what to persist to the refresh state file after a tick, keyed on
+    the NETWORK pull (step0) ONLY — never on a downstream LOCAL step.
+
+    `fetch_ok` is the step0 outcome: None = no refresh attempted (backfill-only
+    or throttled fire), True = the portal pull succeeded, False = it failed.
+
+    Two correctness reasons it must ignore the overall pipeline rc:
+      * A local step3 (scoring) / step1 (parse) failure must NOT masquerade as a
+        portal outage — recording failure there would wrongly suppress the next
+        search refresh for OUTAGE_BACKOFF_MINUTES even though the portal is fine.
+      * A successful portal pull must reset the throttle clock even if a later
+        local step failed; otherwise a persistent local bug (last_success never
+        updated) would re-pull the live portal on every single fire.
+    Returns one of: "record_success", "record_failure", "none"."""
+    if fetch_ok is True:
+        return "record_success"
+    if fetch_ok is False:
+        return "record_failure"
+    return "none"
+
+
 def run_step(label: str, args: list[str], critical: bool, results: list) -> int:
     """Run one entrypoint as a subprocess; record its rc. A failing CRITICAL step
     aborts the tick (no point scoring with no data); non-critical steps warn."""
@@ -310,22 +332,30 @@ def main(args) -> int:
     if not _acquire_lock():
         return 0
     try:
-        rc = _run_pipeline(args, start_year, today.year, years, since, do_refresh)
+        rc, fetch_ok = _run_pipeline(args, start_year, today.year, years, since,
+                                     do_refresh)
     finally:
         _release_lock()
-    # Only a real refresh resets the throttle clock; backfill-only passes don't
-    # (else the every-fire backfill would keep the refresh from ever running).
-    if rc == 0 and do_refresh:
+    # Refresh state (throttle clock + outage backoff) is keyed on the NETWORK
+    # pull (step0) ONLY, via fetch_ok — never on the overall rc, so a downstream
+    # LOCAL step3/step1 failure can't masquerade as a portal outage and a
+    # successful pull still resets the throttle. See refresh_state_action.
+    action = refresh_state_action(fetch_ok)
+    if action == "record_success":
         _record_success()
-    elif rc != 0 and do_refresh:
-        # Record refresh failure so the next fire enters outage backoff and
-        # doesn't burn another ~3 min of retry timeouts on a still-down portal.
+    elif action == "record_failure":
+        # Portal fetch failed: next fire enters outage backoff so it doesn't
+        # burn another ~3 min of retry timeouts on a still-down portal.
         _record_failure()
     return rc
 
 
-def _run_pipeline(args, start_year, end_year, years, since, do_refresh) -> int:
+def _run_pipeline(args, start_year, end_year, years, since,
+                  do_refresh) -> tuple[int, bool | None]:
     results: list = []
+    # Step0 (network pull) outcome, used by refresh_state_action: None = not
+    # attempted, True = pulled OK, False = the portal fetch failed.
+    fetch_ok: bool | None = None
 
     if do_refresh:
         # 1. Re-pull recent search windows (fresh statuses + newly-filed permits).
@@ -348,14 +378,17 @@ def _run_pipeline(args, start_year, end_year, years, since, do_refresh) -> int:
              "--start-year", str(start_year), "--end-year", str(end_year),
              "--no-cache", "--page-delay", str(args.page_delay)],
             critical=True, results=results) != 0:
-            return _summary(results, 2)
+            # Network pull failed -> outage backoff (this is the ONLY refresh
+            # failure; step1 below is local parsing, not a portal outage).
+            return _summary(results, 2), False
+        fetch_ok = True   # portal pull succeeded (network work done)
 
         # 3. Parse search -> sca_permits (idempotent; refreshes status/dates).
         if run_step(
             "step1: parse search -> sca_permits",
             [str(SRC / "step1_parse_search_results.py"), "--module", MODULE],
             critical=True, results=results) != 0:
-            return _summary(results, 2)
+            return _summary(results, 2), fetch_ok
 
         # 4. Fetch detail for NEW records in the window (cache-skip = only the new).
         run_step(
@@ -395,7 +428,10 @@ def _run_pipeline(args, start_year, end_year, years, since, do_refresh) -> int:
         # standalone "run step3b next" note would be misleading noise here.
         [str(SRC / "step3_score.py"), "--rebuild", "--no-cluster-note"],
         critical=True, results=results) != 0:
-        return _summary(results, 2)
+        # Local scoring failure: surfaced via rc, but NOT a portal outage --
+        # fetch_ok (step0's outcome) is returned unchanged so a successful
+        # pull still resets the throttle and a no-refresh fire stays "none".
+        return _summary(results, 2), fetch_ok
 
     # 6b. Re-cluster scored leads into one-row-per-project (dedupe the call list).
     run_step(
@@ -420,7 +456,7 @@ def _run_pipeline(args, start_year, end_year, years, since, do_refresh) -> int:
     run_step("healthcheck: verify DB integrity",
              [str(SRC / "healthcheck.py"), "-q"], critical=False, results=results)
 
-    return _summary(results, 0)
+    return _summary(results, 0), fetch_ok
 
 
 def _summary(results: list, rc: int) -> int:

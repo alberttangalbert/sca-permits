@@ -31,7 +31,7 @@ import datetime as dt
 from step2_fetch_details import select_case_ids
 from step2_parse_details import unparsed_files
 from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUSTERS_SPEC
-from tick import should_refresh, should_skip_entirely
+from tick import should_refresh, should_skip_entirely, refresh_state_action
 from utils.step_2 import detail as detailmod
 from utils.step_0 import fetch as fetchmod
 
@@ -952,6 +952,30 @@ class _FakePostSession:
         return _FakeResp(200, {"Success": True,
                                "Result": {"TotalFound": self.total,
                                           "EntityResults": []}})
+
+
+class RefreshStateAttribution(unittest.TestCase):
+    """The refresh state (throttle clock + outage backoff) must be keyed on the
+    NETWORK pull (step0) only, never on the overall pipeline rc. A local step3
+    scoring failure must NOT record a portal outage, and a successful pull must
+    reset the throttle even if a later local step failed."""
+
+    def test_successful_pull_records_success(self):
+        self.assertEqual(refresh_state_action(True), "record_success")
+
+    def test_failed_pull_records_failure(self):
+        self.assertEqual(refresh_state_action(False), "record_failure")
+
+    def test_no_refresh_records_nothing(self):
+        # Backfill-only / throttled fire: step0 never ran -> touch no state.
+        self.assertEqual(refresh_state_action(None), "none")
+
+    def test_local_step_failure_is_not_an_outage(self):
+        # The bug guard: step0 succeeded (fetch_ok=True) but a downstream LOCAL
+        # step (step3 scoring) failed. _run_pipeline returns (rc=2, fetch_ok=True);
+        # attribution must be record_success (reset throttle), NOT record_failure
+        # (which would wrongly enter portal outage backoff for 30 min).
+        self.assertEqual(refresh_state_action(True), "record_success")
 
 
 class SearchCacheReconciliation(unittest.TestCase):
