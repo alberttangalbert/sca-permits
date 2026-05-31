@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.io import DB_PATH, MIGRATIONS_DIR, ROOT, connect
+from utils.step_3.scoring import band as band_of_score
 
 # Count-based checks: each SQL returns the number of OFFENDING rows; 0 == healthy.
 # severity FAIL trips a nonzero exit; WARN is advisory.
@@ -148,6 +149,18 @@ def _consistency_checks(conn) -> list[tuple]:
         "WHERE cluster_id IS NOT NULL").fetchone()[0]
     out.append(("FAIL", "clusters: row count == distinct lead cluster_ids",
                 cluster_n == distinct_cid, f"{cluster_n} vs {distinct_cid}"))
+
+    # lead_band must equal band(lead_score) for EVERY row. The COUNT_CHECKS
+    # verify score-in-range and band-in-set independently, but not that the two
+    # AGREE -- so a partial re-score (e.g. the [0,100]->[0,1] migration leaving
+    # old-threshold bands behind) or a future BANDS edit applied in code but not
+    # re-scored into the table would store score=0.6/band=MEDIUM and slip
+    # through. Recompute via the REAL band() so there's no threshold to drift.
+    mismatched = sum(
+        1 for score, b in conn.execute("SELECT lead_score, lead_band FROM sca_leads")
+        if score is not None and band_of_score(score) != b)
+    out.append(("FAIL", "leads: lead_band matches band(lead_score)",
+                mismatched == 0, f"{mismatched} mismatched"))
 
     applied = conn.execute("SELECT COUNT(*) FROM _schema_migrations").fetchone()[0]
     on_disk = len(list(MIGRATIONS_DIR.glob("*.sql")))
