@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.config import MODULES
 from utils.io import ROOT, atomic_write_json, connect, load_json
-from utils.step_3.clustering import aggregate, cluster_key
+from utils.step_3.clustering import aggregate, canonical_parcel_by_address, cluster_key
 
 OUTPUTS_DIR = ROOT / "outputs" / "step_3"
 
@@ -71,17 +71,15 @@ def main(args) -> int:
         # MULTIPLE distinct parcels (multi-unit buildings) is NOT canonicalized
         # -- those legitimately have different parcels per unit and shouldn't
         # over-collapse.
-        canonical_parcel = {
-            row[0]: row[1] for row in conn.execute("""
-                SELECT p.address_norm, MIN(COALESCE(d.main_parcel, p.main_parcel))
-                FROM sca_permits p LEFT JOIN sca_permit_detail d USING(case_id)
-                WHERE p.address_norm IS NOT NULL AND p.address_norm != ''
-                  AND COALESCE(d.main_parcel, p.main_parcel) IS NOT NULL
-                  AND COALESCE(d.main_parcel, p.main_parcel) != ''
-                GROUP BY p.address_norm
-                HAVING COUNT(DISTINCT COALESCE(d.main_parcel, p.main_parcel)) = 1
-            """).fetchall()
-        }
+        # Aggregated by canonical_parcel_by_address (pure + unit-tested): keep
+        # only addresses whose permits agree on ONE distinct parcel. Fetch the
+        # raw (address_norm, parcel) pairs over ALL permits (not just scored
+        # leads), so an unscored sibling can still supply the canonical parcel.
+        canonical_parcel = canonical_parcel_by_address(conn.execute("""
+            SELECT p.address_norm, COALESCE(d.main_parcel, p.main_parcel)
+            FROM sca_permits p LEFT JOIN sca_permit_detail d USING(case_id)
+            WHERE p.address_norm IS NOT NULL AND p.address_norm != ''
+        """).fetchall())
         rows = conn.execute(
             "SELECT l.case_id, l.lead_score, l.lead_band, l.category, l.valuation, "
             "l.owner_name, l.owner_email, l.owner_phone, l.contact_role, "

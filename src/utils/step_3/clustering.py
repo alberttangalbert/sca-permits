@@ -12,6 +12,29 @@ anywhere in the project (preferring the anchor's).
 
 from __future__ import annotations
 
+from collections import defaultdict
+
+
+def canonical_parcel_by_address(address_parcel_pairs) -> dict[str, str]:
+    """Map address_norm -> its canonical parcel, ONLY for addresses where every
+    permit that names a parcel agrees on ONE distinct parcel.
+
+    step3b uses this so a NULL-parcel permit can adopt the parcel its siblings
+    at the same address already carry, letting them cluster as one project
+    (5 actionable clusters were split this way pre-fix, 2026-05-29). The
+    single-distinct guard is the hard-won part: an address with MULTIPLE
+    distinct parcels is a multi-unit building that legitimately has a parcel
+    per unit, so adopting one would over-collapse unrelated projects -- such
+    addresses are deliberately omitted. Blank/None address or parcel is ignored.
+    """
+    seen: dict[str, set] = defaultdict(set)
+    for addr, parcel in address_parcel_pairs:
+        a = (addr or "").strip()
+        p = (parcel or "").strip()
+        if a and p:
+            seen[a].add(p)
+    return {a: next(iter(ps)) for a, ps in seen.items() if len(ps) == 1}
+
 
 # Single-word street-suffix tokens that aren't real addresses: an EnerGov
 # data-entry mishap leaves the type suffix alone after city-tail stripping

@@ -20,7 +20,8 @@ from utils.normalize import split_address
 from utils.step_1.parsing import map_entity, parse_page
 from utils.step_2.parsing import (_custom_fields, _fnum, _holds_summary,
                                    normalize_role, parse_detail)
-from utils.step_3.clustering import aggregate, cluster_key
+from utils.step_3.clustering import (aggregate, canonical_parcel_by_address,
+                                      cluster_key)
 from utils.step_3.scoring import (band, classify_type, pick_contacts,
                                    recency_factor, score_record, size_factor,
                                    status_factor)
@@ -425,6 +426,37 @@ class Recency(unittest.TestCase):
     def test_accepts_datetime_prefix(self):
         # apply_date in the DB is an ISO datetime; only the date head matters
         self.assertEqual(recency_factor("2004-04-01T00:00:00", dt.date(2026, 5, 29)), 0.1)
+
+
+class CanonicalParcelByAddress(unittest.TestCase):
+    """The step3b parcel-canonicalization guard: a NULL-parcel permit may adopt
+    its address's parcel ONLY when every permit there agrees on ONE parcel."""
+
+    def test_single_parcel_address_is_canonical(self):
+        # Two permits at the same address, one parcel between them -> adoptable.
+        m = canonical_parcel_by_address([
+            ("123 MAIN", "050011210"), ("123 MAIN", None)])
+        self.assertEqual(m, {"123 MAIN": "050011210"})
+
+    def test_multi_parcel_address_is_excluded(self):
+        # The hard-won guard: a multi-unit building with two distinct parcels
+        # must NOT be canonicalized (adopting one would over-collapse unrelated
+        # projects). The address is omitted from the map entirely.
+        m = canonical_parcel_by_address([
+            ("500 EL CAMINO", "050011210"), ("500 EL CAMINO", "050011211")])
+        self.assertNotIn("500 EL CAMINO", m)
+
+    def test_blank_address_or_parcel_ignored(self):
+        # Empty/whitespace address or parcel contributes nothing.
+        m = canonical_parcel_by_address([
+            ("", "050011210"), ("  ", "X"), ("9 OAK", ""), ("9 OAK", None)])
+        self.assertEqual(m, {})
+
+    def test_repeated_same_parcel_still_single(self):
+        # The same parcel seen many times is still ONE distinct parcel.
+        m = canonical_parcel_by_address([
+            ("7 PINE", "APN1"), ("7 PINE", "APN1"), ("7 PINE", None)])
+        self.assertEqual(m, {"7 PINE": "APN1"})
 
 
 class Clustering(unittest.TestCase):
