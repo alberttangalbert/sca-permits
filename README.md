@@ -274,6 +274,9 @@ migrations/0002_add_permit_detail.sql   sca_permit_detail + sca_permit_contacts
 migrations/0003_add_lead_scores.sql     sca_leads
 migrations/0004_add_scope_and_holds.sql scope (sq ft/stories/construction) + active/blocking holds
 migrations/0005_add_lead_clusters.sql   cluster_id on sca_leads + sca_lead_clusters
+migrations/0006_add_recency_factor.sql  recency_factor col (decays stale migrated permits)
+migrations/0007_add_contact_role.sql    contact_role on sca_leads (which tier the contact came from)
+migrations/0008_clusters_contact_role.sql contact_role on sca_lead_clusters (parity w/ per-permit)
 docs/handoff/                           design notes (platform, API, scoring)
 ```
 
