@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.config import MODULES
-from utils.io import ROOT, atomic_write_json, connect, load_json
+from utils.io import ROOT, atomic_write_json, connect, load_run_ledger
 from utils.step_3.clustering import aggregate, canonical_parcel_by_address, cluster_key
 
 OUTPUTS_DIR = ROOT / "outputs" / "step_3"
@@ -153,8 +153,7 @@ def main(args) -> int:
     finished = dt.datetime.now().astimezone().replace(microsecond=0)
     print(f"  clusters in table: {after}")
 
-    runs = load_json(cluster_runs_json_for(args.module),
-                     {"schema_version": 1, "runs": []})
+    runs = load_run_ledger(cluster_runs_json_for(args.module))
     runs["runs"].append({
         "run_id": run_id, "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),

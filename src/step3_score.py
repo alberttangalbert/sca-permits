@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.config import MODULES
-from utils.io import ROOT, atomic_write_json, connect, load_json
+from utils.io import ROOT, atomic_write_json, connect, load_run_ledger
 from utils.step_3.scoring import score_record
 
 OUTPUTS_DIR = ROOT / "outputs" / "step_3"
@@ -164,7 +164,7 @@ def main(args) -> int:
               "rebuild it (healthcheck will report cluster\n        mismatches "
               "until you do).")
 
-    runs = load_json(score_runs_json_for(module), {"schema_version": 1, "runs": []})
+    runs = load_run_ledger(score_runs_json_for(module))
     runs["runs"].append({
         "run_id": run_id,
         "started_at": started.isoformat(),

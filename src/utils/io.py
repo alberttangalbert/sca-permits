@@ -44,6 +44,35 @@ def load_json(path: Path, default):
         return json.load(fh)
 
 
+def load_run_ledger(path: Path, log=print) -> dict:
+    """Read a step's append-only run ledger ({"schema_version": 1, "runs": [...]}),
+    tolerating damage by starting fresh.
+
+    Every step does `load_json(ledger, default)` then `runs["runs"].append(...)`.
+    But load_json only defaults on a MISSING file, so a corrupt/truncated ledger
+    raises, and a valid-JSON-but-wrong-shape one (e.g. a bare list, or no "runs"
+    key) crashes the .append -- in BOTH cases aborting the step purely over its
+    audit log, AFTER its real DB work committed. For the critical step3 that also
+    skips the clustering + sync that follow. A damaged audit log must never do
+    that: start a fresh ledger (losing history is strictly better than aborting)
+    and warn. Missing file -> fresh, silently (the normal first-run case)."""
+    default = {"schema_version": 1, "runs": []}
+    if not path.exists():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        log(f"  WARNING: run ledger {path.name} unreadable ({str(exc)[:60]}); "
+            f"starting a fresh one")
+        return default
+    if not isinstance(data, dict) or not isinstance(data.get("runs"), list):
+        log(f"  WARNING: run ledger {path.name} has unexpected shape; "
+            f"starting a fresh one")
+        return default
+    return data
+
+
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     """Open a SQLite connection in WAL mode. Auto-creates parent dir."""
     db_path.parent.mkdir(parents=True, exist_ok=True)

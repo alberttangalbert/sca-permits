@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.config import DEFAULT_PAGE_SIZE, MODULES
-from utils.io import ROOT, atomic_write_json, load_json
+from utils.io import ROOT, atomic_write_json, load_run_ledger
 from utils.step_0.fetch import fetch_all
 
 OUTPUTS_DIR = ROOT / "outputs" / "step_0"
@@ -90,7 +90,7 @@ def main(module: str, start_year: int, end_year: int, page_size: int,
               f"of {audit['global_total']} permits "
               f"(outside year range {start_year}..{end_year})")
 
-    runs = load_json(runs_json_for(module), {"schema_version": 1, "runs": []})
+    runs = load_run_ledger(runs_json_for(module))
     runs["runs"].append({
         "run_id": run_id,
         "started_at": started.isoformat(),

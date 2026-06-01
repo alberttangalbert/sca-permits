@@ -37,7 +37,7 @@ from tick import (should_refresh, should_skip_entirely, refresh_state_action,
                   _should_reclaim_lock, LOCK_STALE_SECONDS)
 from utils.step_2 import detail as detailmod
 from utils.step_0 import fetch as fetchmod
-from utils.io import apply_migrations
+from utils.io import apply_migrations, load_run_ledger
 
 
 class TypeFit(unittest.TestCase):
@@ -1293,6 +1293,52 @@ class SearchRequestRetry(unittest.TestCase):
         with self.assertRaises(fetchmod.SearchError):
             fetchmod._request(sess, {}, "count")
         self.assertEqual(sess.calls, fetchmod.MAX_RETRIES + 1)
+
+
+class LoadRunLedger(unittest.TestCase):
+    """Every step reads its audit ledger then appends a run. A corrupt or
+    wrong-shape ledger must not abort the step (esp. the critical step3, after its
+    DB work already committed) -- start fresh instead."""
+
+    def _f(self, d, text=None):
+        p = Path(d) / "runs_permit.json"
+        if text is not None:
+            p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_missing_returns_fresh(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(load_run_ledger(self._f(d), log=lambda *_: None),
+                             {"schema_version": 1, "runs": []})
+
+    def test_valid_ledger_round_trips(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            good = {"schema_version": 1, "runs": [{"run_id": "x"}]}
+            self.assertEqual(
+                load_run_ledger(self._f(d, json.dumps(good)), log=lambda *_: None),
+                good)
+
+    def test_corrupt_json_starts_fresh_not_raise(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            led = load_run_ledger(self._f(d, "{ truncated …"), log=lambda *_: None)
+            self.assertEqual(led, {"schema_version": 1, "runs": []})
+            led["runs"].append({"run_id": "y"})  # the .append must not crash
+
+    def test_wrong_shape_starts_fresh(self):
+        # Valid JSON but not a {runs: [...]} dict -> a bare list would crash the
+        # step's runs["runs"].append; start fresh instead.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(
+                load_run_ledger(self._f(d, "[1, 2, 3]"), log=lambda *_: None),
+                {"schema_version": 1, "runs": []})
+            self.assertEqual(
+                load_run_ledger(self._f(d, '{"runs": "notalist"}'),
+                                log=lambda *_: None),
+                {"schema_version": 1, "runs": []})
 
 
 class ApplyMigrations(unittest.TestCase):

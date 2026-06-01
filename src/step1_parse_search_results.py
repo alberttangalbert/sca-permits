@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.config import MODULES
-from utils.io import ROOT, atomic_write_json, connect, load_json
+from utils.io import ROOT, atomic_write_json, connect, load_json, load_run_ledger
 from utils.step_1.parsing import COLUMNS, parse_page
 
 OUTPUTS_DIR = ROOT / "outputs" / "step_1"
@@ -134,7 +134,7 @@ def main(module: str, dry_run: bool) -> int:
     print(f"  upserts:            {len(all_rows)} "
           f"(new case_ids: {new_rows}, updated existing: {len(all_rows) - new_rows})")
 
-    runs = load_json(runs_json_for(module), {"schema_version": 1, "runs": []})
+    runs = load_run_ledger(runs_json_for(module))
     runs["runs"].append({
         "run_id": run_id,
         "started_at": started.isoformat(),

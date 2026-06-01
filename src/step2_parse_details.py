@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.config import MODULES
-from utils.io import ROOT, atomic_write_json, connect, load_json
+from utils.io import ROOT, atomic_write_json, connect, load_json, load_run_ledger
 from utils.step_2.parsing import (CONTACT_COLUMNS, DETAIL_COLUMNS,
                                    parse_contacts, parse_detail)
 
@@ -182,7 +182,7 @@ def main(module: str, dry_run: bool, limit: int | None,
     print(f"  detail in table:   {after_d}  (+{after_d - before_d} new)")
     print(f"  contacts in table: {after_c}")
 
-    runs = load_json(parse_runs_json_for(module), {"schema_version": 1, "runs": []})
+    runs = load_run_ledger(parse_runs_json_for(module))
     runs["runs"].append({
         "run_id": run_id,
         "started_at": started.isoformat(),
