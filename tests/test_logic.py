@@ -730,6 +730,7 @@ class ExportSinceFloor(unittest.TestCase):
 
     def _db(self):
         c = sqlite3.connect(":memory:")
+        self.addCleanup(c.close)
         c.executescript("""
             CREATE TABLE sca_permits (case_id TEXT PRIMARY KEY, case_number TEXT,
                 case_status TEXT, address_display TEXT, main_parcel TEXT,
@@ -795,6 +796,7 @@ class MissingDetailSelection(unittest.TestCase):
 
     def _db(self):
         c = sqlite3.connect(":memory:")
+        self.addCleanup(c.close)
         c.executescript("""
             CREATE TABLE sca_permits (case_id TEXT PRIMARY KEY, module TEXT,
                 apply_date TEXT, case_status TEXT, case_type TEXT);
@@ -1184,6 +1186,7 @@ class ApplyMigrations(unittest.TestCase):
             self._write(d, "0001_a.sql", "CREATE TABLE t (id INTEGER);")
             self._write(d, "0002_b.sql", "ALTER TABLE t ADD COLUMN name TEXT;")
             conn = sqlite3.connect(":memory:")
+            self.addCleanup(conn.close)
             self.assertEqual(apply_migrations(conn, Path(d)),
                              ["0001_a.sql", "0002_b.sql"])
             # Re-run: nothing re-applied (the non-idempotent ADD COLUMN is skipped).
@@ -1201,6 +1204,7 @@ class ApplyMigrations(unittest.TestCase):
                         "ALTER TABLE t ADD COLUMN name TEXT;\n"
                         "ALTER TABLE t ADD COLUMN name TEXT;")  # duplicate -> error
             conn = sqlite3.connect(":memory:")
+            self.addCleanup(conn.close)
             with self.assertRaises(sqlite3.OperationalError):
                 apply_migrations(conn, Path(d))
             # The first file committed; the failed one did NOT record itself...
@@ -1218,6 +1222,7 @@ class ApplyMigrations(unittest.TestCase):
             self._write(d, "0001_a.sql", "CREATE TABLE t (id INTEGER);")
             self._write(d, "0002_b.sql", "ALTER TABLE t ADD COLUMN name TEXT;\nBOGUS;")
             conn = sqlite3.connect(":memory:")
+            self.addCleanup(conn.close)
             with self.assertRaises(sqlite3.OperationalError):
                 apply_migrations(conn, Path(d))
             # Operator fixes the migration; the rollback left no 'name' column,
