@@ -51,6 +51,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,6 +76,17 @@ def _window_dirs(years: list[int]) -> list[Path]:
     return [base / str(y) for y in years]
 
 
+# A lock older than this is reclaimed even when its recorded pid is LIVE. No real
+# tick runs an hour: a full refresh is bounded to a few minutes, and even a
+# sustained-outage refresh caps at ~10 min (MAX_RETRIES * bounded backoff over the
+# year windows). So a "live" holder this old is a RECYCLED pid, not a running
+# tick. Without this, a tick that's SIGKILL'd (OOM / kill -9 / crash, so
+# _release_lock never runs) whose pid the OS later reuses for an unrelated live
+# process would wedge the pipeline FOREVER -- every future fire would see a "live"
+# holder and skip. This bounds that worst case to one stale window.
+LOCK_STALE_SECONDS = 3600
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -85,9 +97,23 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _should_reclaim_lock(holder: int, alive: bool, age_seconds: float | None,
+                         stale_seconds: float = LOCK_STALE_SECONDS) -> bool:
+    """Pure decision for whether an existing lock should be reclaimed: when the
+    holder pid is unknown (-1) or dead, OR the lock is older than stale_seconds (a
+    live pid that old is a recycled pid, not a real tick). Pure so the pid-recycle
+    guard is unit-tested rather than trusted to live filesystem state."""
+    if holder == -1 or not alive:
+        return True
+    if age_seconds is not None and age_seconds >= stale_seconds:
+        return True
+    return False
+
+
 def _acquire_lock() -> bool:
-    """Create the lock atomically. If it already exists for a LIVE pid, refuse;
-    a stale lock (dead pid / unreadable) is reclaimed."""
+    """Create the lock atomically. If it already exists for a LIVE pid that isn't
+    stale, refuse; a stale lock (dead/unknown pid, or older than LOCK_STALE_SECONDS
+    so its live pid must be recycled) is reclaimed."""
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -99,10 +125,17 @@ def _acquire_lock() -> bool:
             holder = int(LOCK_PATH.read_text().strip())
         except (ValueError, OSError):
             holder = -1
-        if holder != -1 and _pid_alive(holder):
+        alive = holder != -1 and _pid_alive(holder)
+        try:
+            age = time.time() - LOCK_PATH.stat().st_mtime
+        except OSError:
+            age = None
+        if not _should_reclaim_lock(holder, alive, age):
             print(f"[tick] another tick is running (pid {holder}); skipping.")
             return False
-        print(f"[tick] reclaiming stale lock (pid {holder} not alive).")
+        why = ("pid not alive" if (holder == -1 or not alive)
+               else f"lock > {LOCK_STALE_SECONDS // 60}min old, pid {holder} likely recycled")
+        print(f"[tick] reclaiming stale lock ({why}).")
         LOCK_PATH.write_text(str(os.getpid()))
         return True
 

@@ -32,7 +32,8 @@ import datetime as dt
 from step2_fetch_details import select_case_ids
 from step2_parse_details import unparsed_files
 from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUSTERS_SPEC
-from tick import should_refresh, should_skip_entirely, refresh_state_action
+from tick import (should_refresh, should_skip_entirely, refresh_state_action,
+                  _should_reclaim_lock, LOCK_STALE_SECONDS)
 from utils.step_2 import detail as detailmod
 from utils.step_0 import fetch as fetchmod
 from utils.io import apply_migrations
@@ -1043,6 +1044,39 @@ class _FakePostSession:
         return _FakeResp(200, {"Success": True,
                                "Result": {"TotalFound": self.total,
                                           "EntityResults": []}})
+
+
+class LockReclaim(unittest.TestCase):
+    """The run-lock must reclaim a stale lock without ever running two ticks at
+    once. The hard case is pid RECYCLING: a SIGKILL'd tick (lock never released)
+    whose pid the OS reuses for an unrelated LIVE process would otherwise wedge
+    the pipeline forever, since every fire sees a 'live' holder and skips."""
+
+    def test_live_recent_holder_is_not_reclaimed(self):
+        # A genuinely running tick: live pid, lock a minute old -> don't reclaim.
+        self.assertFalse(_should_reclaim_lock(1234, alive=True, age_seconds=60))
+
+    def test_dead_holder_is_reclaimed(self):
+        self.assertTrue(_should_reclaim_lock(1234, alive=False, age_seconds=5))
+
+    def test_unknown_holder_is_reclaimed(self):
+        # Unreadable/garbage lock body -> holder -1 -> reclaim regardless of age.
+        self.assertTrue(_should_reclaim_lock(-1, alive=False, age_seconds=None))
+
+    def test_live_but_stale_holder_is_reclaimed_pid_recycle_guard(self):
+        # The pid-recycle guard: a 'live' pid on an hours-old lock can't be a real
+        # tick (those finish in minutes), so it's a recycled pid -> reclaim.
+        self.assertTrue(_should_reclaim_lock(
+            1234, alive=True, age_seconds=LOCK_STALE_SECONDS + 1))
+
+    def test_live_holder_just_under_stale_bound_is_kept(self):
+        self.assertFalse(_should_reclaim_lock(
+            1234, alive=True, age_seconds=LOCK_STALE_SECONDS - 1))
+
+    def test_missing_age_with_live_holder_is_kept(self):
+        # stat() failed (age None) but pid is live and readable -> conservative:
+        # treat as a running tick, don't reclaim (avoid racing a live holder).
+        self.assertFalse(_should_reclaim_lock(1234, alive=True, age_seconds=None))
 
 
 class RefreshStateAttribution(unittest.TestCase):
