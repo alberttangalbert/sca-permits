@@ -324,6 +324,9 @@ def main(args) -> int:
             print(f"  2. step0 --start-year {start_year} --end-year {today.year} --no-cache")
             print(f"  3. step1 parse")
             print(f"  4. step2 fetch --since {since}   (cache-skips existing -> new only)")
+            if not args.skip_stale_refresh:
+                print(f"  2b. step0b refresh stale-status old actionable leads "
+                      f"(re-pull their ApplyDate day-windows; --refresh-years {args.refresh_years})")
         else:
             print(f"  REFRESH skipped (last run {age_h:.1f}h ago < {args.min_interval_hours}h).")
         floor = f" --since {args.backfill_since}" if args.backfill_since else ""
@@ -415,6 +418,20 @@ def _run_pipeline(args, start_year, end_year, years, since,
             # failure; step1 below is local parsing, not a portal outage).
             return _summary(results, 2), False
         fetch_ok = True   # portal pull succeeded (network work done)
+
+        # 2b. Targeted stale-status refresh: the main window above only re-pulls
+        #     the recent years, so actionable leads filed earlier (a 2024 permit
+        #     frozen at "Approved" the city has since Issued) keep a stale status.
+        #     Re-pull just those leads' ApplyDate day-windows here, BEFORE step1,
+        #     so step1 upserts their fresh status. Non-critical: a failure leaves
+        #     those few statuses at last-known, never aborts the tick.
+        if not args.skip_stale_refresh:
+            run_step(
+                "step0b: refresh stale-status old actionable leads",
+                [str(SRC / "step0b_refresh_stale.py"), "--module", MODULE,
+                 "--refresh-years", str(args.refresh_years),
+                 "--page-delay", str(args.page_delay)],
+                critical=False, results=results)
 
         # 3. Parse search -> sca_permits (idempotent; refreshes status/dates).
         if run_step(
@@ -519,6 +536,9 @@ if __name__ == "__main__":
                         "skips the pre-2020 archival tail (those are all >5y old -> "
                         "recency_factor 0.1 -> never actionable leads). Pass an "
                         "empty string to backfill the full 1999-present history.")
+    p.add_argument("--skip-stale-refresh", action="store_true",
+                   help="Don't run step 0b (the targeted re-pull of actionable "
+                        "leads outside the refresh window). Refresh-only.")
     p.add_argument("--skip-sync", action="store_true",
                    help="Don't run step 4 (no D1 SQL regeneration).")
     p.add_argument("--execute-sync", action="store_true",

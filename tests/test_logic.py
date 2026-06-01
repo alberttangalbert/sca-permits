@@ -32,6 +32,8 @@ import datetime as dt
 from step2_fetch_details import select_case_ids
 from step2_parse_details import unparsed_files, _read_cached_detail
 from step1_parse_search_results import _parse_pages
+from step0b_refresh_stale import (stale_apply_days, refresh_floor,
+                                   _at_risk_apply_dates)
 from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUSTERS_SPEC
 from tick import (should_refresh, should_skip_entirely, refresh_state_action,
                   _should_reclaim_lock, LOCK_STALE_SECONDS)
@@ -1113,6 +1115,55 @@ class _FakePostSession:
         return _FakeResp(200, {"Success": True,
                                "Result": {"TotalFound": self.total,
                                           "EntityResults": []}})
+
+
+class StaleRefresh(unittest.TestCase):
+    """Step 0b re-pulls the ApplyDate day-windows of actionable leads filed before
+    the refresh floor, so their status doesn't go stale outside the main window."""
+
+    def test_refresh_floor_matches_tick_window(self):
+        # refresh_years=2, 2026 -> 2025-01-01 (2025+2026 refreshed; <2025 isn't).
+        self.assertEqual(refresh_floor(dt.date(2026, 6, 1), 2), "2025-01-01")
+        self.assertEqual(refresh_floor(dt.date(2026, 6, 1), 4), "2023-01-01")
+
+    def test_stale_apply_days_dedups_and_sorts(self):
+        # Many leads filed the same day cost ONE day-window; output sorted dates.
+        days = stale_apply_days([
+            "2024-05-15T10:00:00", "2024-05-15T14:00:00",  # same day -> one
+            "2024-01-02T00:00:00", "2023-11-30T09:00:00"])
+        self.assertEqual(days, [dt.date(2023, 11, 30), dt.date(2024, 1, 2),
+                                dt.date(2024, 5, 15)])
+
+    def test_stale_apply_days_skips_blank_and_unparseable(self):
+        days = stale_apply_days([None, "", "not-a-date", "2024-03-04T00:00:00"])
+        self.assertEqual(days, [dt.date(2024, 3, 4)])
+
+    def test_at_risk_query_selects_old_actionable_only(self):
+        c = sqlite3.connect(":memory:")
+        self.addCleanup(c.close)
+        c.executescript("""
+            CREATE TABLE sca_permits (case_id TEXT PRIMARY KEY, apply_date TEXT);
+            CREATE TABLE sca_leads (case_id TEXT PRIMARY KEY, lead_band TEXT,
+                status_bucket TEXT);
+        """)
+        c.executemany("INSERT INTO sca_permits VALUES (?,?)", [
+            ("old-hi", "2024-06-01T00:00:00"),   # old + HIGH -> at risk
+            ("old-drop", "2024-06-01T00:00:00"),  # old but DROP -> not actionable
+            ("new-hi", "2025-06-01T00:00:00"),    # HIGH but in-window -> skip
+            ("null-hi", None),                    # no apply_date -> skip
+        ])
+        c.executemany("INSERT INTO sca_leads VALUES (?,?,?)", [
+            ("old-hi", "HIGH", "READY_TO_ISSUE"), ("old-drop", "DROP", "DEAD"),
+            ("new-hi", "HIGH", "IN_REVIEW"), ("null-hi", "MEDIUM", "IN_REVIEW")])
+        c.commit()
+        got = _at_risk_apply_dates(c, "2025-01-01")
+        self.assertEqual(got, ["2024-06-01T00:00:00"])  # only old-hi
+
+    def test_at_risk_query_tolerates_missing_tables(self):
+        # Brand-new DB (no sca_leads yet) -> [] not a crash.
+        c = sqlite3.connect(":memory:")
+        self.addCleanup(c.close)
+        self.assertEqual(_at_risk_apply_dates(c, "2025-01-01"), [])
 
 
 class LockReclaim(unittest.TestCase):
