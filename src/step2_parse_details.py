@@ -49,6 +49,36 @@ def unparsed_files(all_files: list[Path], have: set[str]) -> list[Path]:
     return [f for f in all_files if f.stem not in have]
 
 
+def _read_cached_detail(f: Path, log=print):
+    """Load one cached detail file, returning its parsed dict, or None if it's
+    unreadable.
+
+    load_json only defaults on a MISSING file, so a corrupt/truncated cached
+    detail raises -- and unlike the search cache (re-fetched with --no-cache every
+    refresh), the detail cache is cache-SKIPPED, so a corrupt file is a POISON
+    PILL: it would crash the whole parse and persist, breaking detail parsing
+    every run until cleared by hand. Handle the two failure modes differently:
+
+      * ValueError (corrupt JSON content): definitively garbage -> remove it so
+        the next step2 fetch re-fetches a clean copy (self-healing).
+      * OSError (transient read / permission): skip WITHOUT deleting -- the file
+        may be fine; never destroy a good record on a flaky read.
+    """
+    try:
+        return load_json(f, {})
+    except ValueError as exc:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        log(f"  WARNING: removed corrupt detail {f.name} (will re-fetch): "
+            f"{str(exc)[:80]}")
+        return None
+    except OSError as exc:
+        log(f"  WARNING: skipping unreadable detail {f.name}: {str(exc)[:80]}")
+        return None
+
+
 def _detail_upsert_sql() -> str:
     cols = DETAIL_COLUMNS + ["detail_parsed_at"]
     placeholders = ", ".join(f":{c}" for c in cols)
@@ -104,9 +134,13 @@ def main(module: str, dry_run: bool, limit: int | None,
 
     detail_rows, contact_batches = [], []
     total_contacts = 0
+    bad_files = []
     for f in files:
         case_id = f.stem
-        result = load_json(f, {})
+        result = _read_cached_detail(f)
+        if result is None:        # corrupt (removed) or transiently unreadable
+            bad_files.append(f.name)
+            continue
         detail_rows.append(parse_detail(result, case_id))
         contacts = parse_contacts(result, case_id)
         contact_batches.append((case_id, contacts))
@@ -114,6 +148,8 @@ def main(module: str, dry_run: bool, limit: int | None,
 
     print(f"  detail rows:   {len(detail_rows)}")
     print(f"  contact rows:  {total_contacts}")
+    if bad_files:
+        print(f"  unreadable:    {len(bad_files)} cached detail file(s) skipped")
 
     if dry_run:
         print("  DRY RUN — not writing to DB.")
@@ -152,6 +188,7 @@ def main(module: str, dry_run: bool, limit: int | None,
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "files_parsed": len(files),
+        "files_unreadable": len(bad_files),
         "detail_rows": len(detail_rows),
         "contact_rows": total_contacts,
         "detail_count_after": after_d,

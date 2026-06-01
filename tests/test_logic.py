@@ -30,7 +30,7 @@ import sqlite3
 import datetime as dt
 
 from step2_fetch_details import select_case_ids
-from step2_parse_details import unparsed_files
+from step2_parse_details import unparsed_files, _read_cached_detail
 from step1_parse_search_results import _parse_pages
 from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUSTERS_SPEC
 from tick import (should_refresh, should_skip_entirely, refresh_state_action,
@@ -981,6 +981,39 @@ class DetailFetchRetry(unittest.TestCase):
         with self.assertRaises(detailmod.DetailError):
             detailmod.fetch_one(sess, "case-bad2")
         self.assertEqual(sess.calls, detailmod.MAX_RETRIES + 1)
+
+
+class ReadCachedDetail(unittest.TestCase):
+    """The detail cache is cache-SKIPPED (never auto-overwritten), so a corrupt
+    cached detail file would be a poison pill: it crashes the parse and persists.
+    _read_cached_detail must (a) parse a good file, (b) REMOVE a corrupt-content
+    file so the next fetch re-fetches it (self-healing), and (c) NOT crash."""
+
+    def test_good_file_parsed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "abc.json"
+            f.write_text(json.dumps({"ValuationValue": 1000.0}))
+            self.assertEqual(_read_cached_detail(f, log=lambda *_: None),
+                             {"ValuationValue": 1000.0})
+            self.assertTrue(f.exists())  # good file is left in place
+
+    def test_corrupt_file_removed_and_returns_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "bad.json"
+            f.write_text("{ truncated …")
+            self.assertIsNone(_read_cached_detail(f, log=lambda *_: None))
+            # Removed so the next step2 fetch re-fetches a clean copy.
+            self.assertFalse(f.exists())
+
+    def test_missing_file_returns_empty_dict_not_none(self):
+        # A missing file isn't an error here (load_json defaults); only present-
+        # but-unreadable files are the poison-pill case.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "gone.json"
+            self.assertEqual(_read_cached_detail(f, log=lambda *_: None), {})
 
 
 class UnparsedFiles(unittest.TestCase):
