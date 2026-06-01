@@ -101,12 +101,15 @@ The score is the pure product of the six 0–1 factors, so it lives in `[0, 1]`
 
 - **`type_fit`** (`src/utils/step_3/type_fit_rules.json`) — ordered substring
   match on `case_type`: new SFR / ADU / second-unit = 1.0, addition = 0.9,
-  interior remodel = 0.75, sub-trades (solar, reroof, HVAC, electrical…) ≈ 0.1,
-  commercial = 0.2. A description-keyword pass upgrades the broad
-  "Miscellaneous" bucket when it names an ADU / addition / new dwelling. A
-  separate description-prefix override (`^VOID|WRONG PERMIT TYPE|...`) forces
-  DEAD status when a city worker void-marked the description but left the
-  case_status stale.
+  interior remodel = 0.75, accessory structure (detached studio / patio cover) =
+  0.7, sub-trades (solar, reroof, HVAC, electrical…) ≈ 0.1, commercial = 0.2. The
+  `category` tag is coarse (NEW_SFR / ADU / ADDITION / REMODEL / ACCESSORY /
+  COMMERCIAL / SUBTRADE / OTHER); `type_fit` is the score. A description-keyword
+  pass upgrades the broad "Miscellaneous" **and ACCESSORY** buckets when the text
+  names an ADU / addition / new dwelling (so a detached structure described as a
+  new ADU still scores as one). A separate description-prefix override
+  (`^VOID|WRONG PERMIT TYPE|...`) forces DEAD status when a city worker
+  void-marked the description but left the case_status stale.
 - **`size_factor`** — bucketed from EnerGov `ValuationValue` (the size signal
   Cupertino lacked); a missing/0 valuation is neutral, not zero.
 - **`status_factor`** — the near-issuance window scores highest (`Approved`,
@@ -196,6 +199,14 @@ loop incrementally, on **two cadences**:
   this catches every status transition), parse, and fetch detail **only for
   newly-filed permits** (cache-skips the rest). `--min-interval-hours` guards the
   live portal so a frequent scheduler can't hammer it.
+- **Stale-status refresh (step 0b, on every search re-pull):** the year-window
+  re-pull only covers recent years, so an actionable lead filed earlier (e.g. a
+  2024 permit frozen at "Approved" the city has since Issued) would keep a stale
+  status. step 0b re-pulls the narrow **ApplyDate day-window** of every current
+  HIGH/MEDIUM lead filed before the refresh floor — one cheap day-window per
+  distinct filing day — so step 1 upserts their fresh status and the re-score
+  drops any that went dead. `--limit-days` bounds it; it bails after a few
+  consecutive portal errors (rate-limit politeness); `--skip-stale-refresh` off.
 - **Historical detail backfill (every fire):** enrich a `--backfill-chunk`
   (default 200, newest-missing first) of the ~50k older permits that are still
   search-only, until the whole history has detail. It self-quiesces when nothing
@@ -239,7 +250,7 @@ resumable.
 
 Cached search pages: `outputs/raw/sca/permit/<year>/page_NNN.json`. Cached detail:
 `outputs/raw/sca/permit_detail/<case_id>.json`. Audit ledgers under
-`outputs/step_{0,1,2}/`. Database: `outputs/sca_permits.db`.
+`outputs/step_{0,1,2,3}/`. Database: `outputs/sca_permits.db`.
 
 ## Layout
 
@@ -247,6 +258,7 @@ Cached search pages: `outputs/raw/sca/permit/<year>/page_NNN.json`. Cached detai
 src/
   init_db.py                      apply migrations
   step0_fetch_search_results.py   paged JSON search client   (entrypoint)
+  step0b_refresh_stale.py         re-pull stale-status old actionable leads (entrypoint)
   step1_parse_search_results.py   JSON -> sca_permits         (entrypoint)
   step2_fetch_details.py          per-record detail GETs      (entrypoint)
   step2_parse_details.py          detail JSON -> detail+contacts (entrypoint)
