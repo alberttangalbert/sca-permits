@@ -142,6 +142,19 @@ def _fetch_window(session, filter_module, sort_by, d0, d1, raw_dir, page_size,
             return
 
     pages = math.ceil(count / page_size)
+    if count >= RESULT_WINDOW_CAP:
+        # Only reachable as the un-splittable single-day leaf above (the
+        # multi-day over-cap case already returned). Offset paging dies at
+        # from+size > RESULT_WINDOW_CAP, so page (RESULT_WINDOW_CAP // page_size)
+        # is the LAST fetchable one; clip the loop there instead of issuing
+        # doomed >cap-offset GETs that the portal rejects (a SearchError that
+        # would abort the rest of the year's windows). This makes the behavior
+        # match the "capped at RESULT_WINDOW_CAP" log above; the genuinely
+        # unreachable surplus surfaces honestly as reconciled=False (records_seen
+        # < sum_window_counts), not as a crash. Unreachable for San Carlos
+        # (~2k permits/year) but the year-chunking doctrine is ported, so the
+        # leaf must respect the same cap the splitter does.
+        pages = min(pages, RESULT_WINDOW_CAP // page_size)
     audit["windows"].append({"label": label, "count": count, "pages": pages})
     audit["sum_window_counts"] += count
     win_dir = raw_dir / label

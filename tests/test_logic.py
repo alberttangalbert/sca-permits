@@ -1078,6 +1078,35 @@ class SearchCacheReconciliation(unittest.TestCase):
             # the reconciliation the entrypoint computes is now True on warm cache
             self.assertEqual(audit["records_seen"], audit["sum_window_counts"])
 
+    def test_single_day_over_cap_clips_pages_to_window_cap(self):
+        # An un-splittable single-day window whose count EXCEEDS the 10k offset
+        # cap must clip its page loop at RESULT_WINDOW_CAP // page_size, not try
+        # to page past from+size > cap (which the portal rejects, erroring out
+        # the rest of the year). count must be > cap (not ==): count == cap pages
+        # cleanly to exactly cap//page_size pages.
+        import tempfile
+        cap = fetchmod.RESULT_WINDOW_CAP
+        with tempfile.TemporaryDirectory() as td:
+            raw_dir = Path(td)
+            day = dt.date(2026, 3, 4)
+            sess = _FakePostSession(total=cap + 250)   # > cap, single day
+            audit = self._audit()
+            self._sleep = fetchmod.time.sleep
+            fetchmod.time.sleep = lambda *_: None
+            try:
+                fetchmod._fetch_window(sess, 2, "ApplyDate", day, day,
+                                       raw_dir, 100, 0.0, True, audit,
+                                       lambda *_: None)
+            finally:
+                fetchmod.time.sleep = self._sleep
+            # Clipped to the last fetchable page; NOT ceil((cap+250)/100) = cap//100 + 3.
+            self.assertEqual(audit["pages_fetched"], cap // 100)
+            self.assertEqual(audit["windows"][0]["pages"], cap // 100)
+            # The full count is still recorded, so reconciliation honestly flags
+            # the unreachable surplus (records_seen < sum_window_counts) rather
+            # than masking it.
+            self.assertEqual(audit["sum_window_counts"], cap + 250)
+
     def test_unreadable_cached_page_left_uncounted(self):
         # A corrupt cache file is tolerated (no crash) but stays uncounted, so
         # reconciliation correctly flags the gap rather than masking it.
