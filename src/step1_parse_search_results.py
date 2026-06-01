@@ -39,6 +39,32 @@ def runs_json_for(module: str) -> Path:
     return OUTPUTS_DIR / f"runs_{MODULES[module]['raw_subdir']}.json"
 
 
+def _parse_pages(pages, module, log=print):
+    """Parse cached page files to rows, returning (rows, bad_page_names).
+
+    A corrupt/truncated cached page (disk issue, interrupted external copy, a
+    partially-synced file) must NOT abort the whole parse: load_json only returns
+    its default when the file is MISSING, so a malformed-but-present page raises
+    JSONDecodeError -- and step1 is the tick's CRITICAL step, so that unhandled
+    error aborts the ENTIRE tick. Skip the bad page instead (the other pages still
+    carry their records, and step0 re-fetches the window on the next refresh).
+    Mirrors step0's own defensive handling of unreadable cached pages."""
+    rows: list[dict] = []
+    bad: list[str] = []
+    for page_file in pages:
+        m = _PAGE_NUM.search(page_file.name)
+        page_num = int(m.group(1)) if m else 0
+        try:
+            result = load_json(page_file, {})
+        except (OSError, ValueError) as exc:
+            bad.append(page_file.name)
+            log(f"  WARNING: skipping unreadable page {page_file.name}: "
+                f"{str(exc)[:80]}")
+            continue
+        rows.extend(parse_page(result, module, page_num))
+    return rows, bad
+
+
 def _upsert_sql() -> str:
     cols = COLUMNS + ["first_seen_at", "last_seen_at"]
     placeholders = ", ".join(f":{c}" for c in cols)
@@ -69,17 +95,16 @@ def main(module: str, dry_run: bool) -> int:
         print("  no cached pages — run step 0 first.")
         return 1
 
-    # Parse all pages into rows.
-    all_rows: list[dict] = []
-    for page_file in pages:
-        m = _PAGE_NUM.search(page_file.name)
-        page_num = int(m.group(1)) if m else 0
-        result = load_json(page_file, {})
-        all_rows.extend(parse_page(result, module, page_num))
+    # Parse all pages into rows (a corrupt page is skipped, not fatal -- see
+    # _parse_pages; step1 is the tick's critical step so it must survive one).
+    all_rows, bad_pages = _parse_pages(pages, module)
 
     distinct_ids = {r["case_id"] for r in all_rows}
     print(f"  parsed rows:        {len(all_rows)}")
     print(f"  distinct case_ids:  {len(distinct_ids)}")
+    if bad_pages:
+        print(f"  unreadable pages:   {len(bad_pages)} skipped "
+              f"(step0 re-fetches the window next refresh)")
 
     if dry_run:
         print("  DRY RUN — not writing to DB.")
@@ -115,6 +140,7 @@ def main(module: str, dry_run: bool) -> int:
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "pages_parsed": len(pages),
+        "pages_unreadable": len(bad_pages),
         "rows_parsed": len(all_rows),
         "distinct_case_ids": len(distinct_ids),
         "table_count_after": after,

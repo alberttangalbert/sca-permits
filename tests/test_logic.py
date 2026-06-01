@@ -31,6 +31,7 @@ import datetime as dt
 
 from step2_fetch_details import select_case_ids
 from step2_parse_details import unparsed_files
+from step1_parse_search_results import _parse_pages
 from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUSTERS_SPEC
 from tick import (should_refresh, should_skip_entirely, refresh_state_action,
                   _should_reclaim_lock, LOCK_STALE_SECONDS)
@@ -679,6 +680,41 @@ class AddressNormalization(unittest.TestCase):
         self.assertEqual(
             split_address("25 DEVONSHIRE BLVD Unit: APT. 2"),
             ("25 DEVONSHIRE BLVD", "APT. 2"))
+
+
+class Step1CorruptPage(unittest.TestCase):
+    """A corrupt/truncated cached page must NOT abort step1: load_json only
+    defaults on a MISSING file, so a malformed-but-present page raises
+    JSONDecodeError -- and step1 is the tick's CRITICAL step, so an unhandled
+    error there aborts the whole tick. _parse_pages skips the bad page and parses
+    the rest, mirroring step0's defensive handling."""
+
+    def _page(self, d, name, text):
+        (Path(d) / name).write_text(text, encoding="utf-8")
+        return Path(d) / name
+
+    def test_corrupt_page_skipped_good_pages_still_parsed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            good = self._page(d, "page_001.json", json.dumps(
+                {"EntityResults": [{"CaseId": "a", "CaseNumber": "1"},
+                                   {"CaseId": "b", "CaseNumber": "2"}]}))
+            bad = self._page(d, "page_002.json", "{ truncated json …")
+            good2 = self._page(d, "page_003.json", json.dumps(
+                {"EntityResults": [{"CaseId": "c", "CaseNumber": "3"}]}))
+            rows, bad_names = _parse_pages([good, bad, good2], "Permit",
+                                           log=lambda *_: None)
+            self.assertEqual({r["case_id"] for r in rows}, {"a", "b", "c"})
+            self.assertEqual(bad_names, ["page_002.json"])  # the corrupt one only
+
+    def test_all_pages_good_reports_no_bad(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = self._page(d, "page_001.json",
+                           json.dumps({"EntityResults": [{"CaseId": "a"}]}))
+            rows, bad_names = _parse_pages([p], "Permit", log=lambda *_: None)
+            self.assertEqual(bad_names, [])
+            self.assertEqual(len(rows), 1)
 
 
 class Step1Parsing(unittest.TestCase):
