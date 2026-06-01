@@ -6,8 +6,10 @@ refresh loop the handoff describes:
   1. Re-pull the recent ApplyDate year-windows (default last 2 years) from search.
      Status — the score-critical field — lives on the search row, so this cheap
      re-pull catches every status transition (In Review -> Approved -> Issued).
-     The window cache is CLEARED first: re-pulling without clearing could leave
-     stale trailing pages that re-introduce old statuses when step 1 parses.
+     The re-pull OVERWRITES each cached page in place (--no-cache + atomic
+     write), so the old cache stays valid until each new page lands -- an
+     earlier design rm-treed the window dirs up front, which stranded the cache
+     empty when the portal went 500 mid-pull (see the step0 note below).
   2. Re-parse search JSON -> sca_permits (idempotent upsert; updates status/dates).
   3. Fetch detail for records in the window that still LACK a detail row (the
      newly-filed permits) — cache-skip handles the rest, so this is cheap.
