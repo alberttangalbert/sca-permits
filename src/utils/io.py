@@ -76,10 +76,29 @@ def apply_migrations(conn: sqlite3.Connection,
         if f.name in already:
             continue
         sql = f.read_text(encoding="utf-8")
-        conn.executescript(sql)
-        conn.execute(
-            "INSERT INTO _schema_migrations (filename, applied_at) "
-            "VALUES (?, datetime('now'))", (f.name,))
+        # Apply each migration ATOMICALLY: the file's DDL and its bookkeeping row
+        # commit together, or neither does. executescript() otherwise runs in
+        # autocommit, so a multi-statement file (e.g. 0004's ten ADD COLUMNs) that
+        # failed partway would leave some columns added but the file unrecorded --
+        # and since ALTER TABLE ADD COLUMN isn't idempotent, the retry would re-run
+        # the already-applied ADD COLUMN and crash with "duplicate column",
+        # bricking the pipeline. Wrapping in BEGIN/COMMIT (with rollback on error)
+        # makes a partial failure a clean no-op the next run can retry. The
+        # bookkeeping INSERT lives inside the same transaction; the filename is
+        # ours (migrations dir) but we still escape quotes defensively since
+        # executescript() can't bind parameters.
+        fname = f.name.replace("'", "''")
+        script = (
+            "BEGIN;\n"
+            + sql
+            + "\nINSERT INTO _schema_migrations (filename, applied_at) "
+            + f"VALUES ('{fname}', datetime('now'));\n"
+            + "COMMIT;\n"
+        )
+        try:
+            conn.executescript(script)
+        except Exception:
+            conn.rollback()  # undo the partially-applied DDL (SQLite DDL is transactional)
+            raise
         applied.append(f.name)
-    conn.commit()
     return applied

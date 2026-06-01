@@ -35,6 +35,7 @@ from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUST
 from tick import should_refresh, should_skip_entirely, refresh_state_action
 from utils.step_2 import detail as detailmod
 from utils.step_0 import fetch as fetchmod
+from utils.io import apply_migrations
 
 
 class TypeFit(unittest.TestCase):
@@ -1135,6 +1136,67 @@ class SearchRequestRetry(unittest.TestCase):
         with self.assertRaises(fetchmod.SearchError):
             fetchmod._request(sess, {}, "count")
         self.assertEqual(sess.calls, fetchmod.MAX_RETRIES + 1)
+
+
+class ApplyMigrations(unittest.TestCase):
+    """apply_migrations must be atomic per file: a migration that fails partway
+    leaves the DB unchanged and unrecorded, so the next run can cleanly retry it
+    (the ALTER TABLE ADD COLUMN family is not idempotent, so a half-applied +
+    unrecorded migration would otherwise brick the pipeline on re-run)."""
+
+    import tempfile
+
+    def _write(self, d, name, sql):
+        (Path(d) / name).write_text(sql, encoding="utf-8")
+
+    def test_happy_path_applies_all_and_is_idempotent(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "0001_a.sql", "CREATE TABLE t (id INTEGER);")
+            self._write(d, "0002_b.sql", "ALTER TABLE t ADD COLUMN name TEXT;")
+            conn = sqlite3.connect(":memory:")
+            self.assertEqual(apply_migrations(conn, Path(d)),
+                             ["0001_a.sql", "0002_b.sql"])
+            # Re-run: nothing re-applied (the non-idempotent ADD COLUMN is skipped).
+            self.assertEqual(apply_migrations(conn, Path(d)), [])
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(t)")}
+            self.assertEqual(cols, {"id", "name"})
+
+    def test_failed_migration_rolls_back_and_is_not_recorded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "0001_a.sql", "CREATE TABLE t (id INTEGER);")
+            # Second file: a valid ADD COLUMN followed by a broken statement, so
+            # it fails *after* a DDL side effect — the exact partial-failure case.
+            self._write(d, "0002_b.sql",
+                        "ALTER TABLE t ADD COLUMN name TEXT;\n"
+                        "ALTER TABLE t ADD COLUMN name TEXT;")  # duplicate -> error
+            conn = sqlite3.connect(":memory:")
+            with self.assertRaises(sqlite3.OperationalError):
+                apply_migrations(conn, Path(d))
+            # The first file committed; the failed one did NOT record itself...
+            recorded = {r[0] for r in conn.execute(
+                "SELECT filename FROM _schema_migrations")}
+            self.assertEqual(recorded, {"0001_a.sql"})
+            # ...and its partial DDL was rolled back: 'name' must NOT exist, so a
+            # corrected re-run can apply it cleanly.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(t)")}
+            self.assertEqual(cols, {"id"})
+
+    def test_retry_after_fix_succeeds(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "0001_a.sql", "CREATE TABLE t (id INTEGER);")
+            self._write(d, "0002_b.sql", "ALTER TABLE t ADD COLUMN name TEXT;\nBOGUS;")
+            conn = sqlite3.connect(":memory:")
+            with self.assertRaises(sqlite3.OperationalError):
+                apply_migrations(conn, Path(d))
+            # Operator fixes the migration; the rollback left no 'name' column,
+            # so the corrected file applies without a duplicate-column crash.
+            self._write(d, "0002_b.sql", "ALTER TABLE t ADD COLUMN name TEXT;")
+            self.assertEqual(apply_migrations(conn, Path(d)), ["0002_b.sql"])
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(t)")}
+            self.assertEqual(cols, {"id", "name"})
 
 
 if __name__ == "__main__":
