@@ -48,7 +48,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from utils.io import ROOT, connect
+from utils.io import ROOT, atomic_write_csv, connect
 
 OUTPUTS_DIR = ROOT / "outputs" / "step_4"
 CHUNK = 100  # rows per multi-row INSERT (and per HTTP request batch)
@@ -92,6 +92,18 @@ FROM sca_leads l JOIN sca_permits p USING(case_id)
     "date_col": "p.apply_date",
     "order_by": "l.lead_score DESC",
     "indexes": [("band", "lead_band"), ("score", "lead_score")],
+    # Human-readable call sheet (--csv): a curated, call-friendly subset/order of
+    # the export columns, (source_column, friendly_header). One row per scored
+    # permit.
+    "csv_file": "call_sheet_leads.csv",
+    "csv_columns": [
+        ("lead_band", "band"), ("lead_score", "score"),
+        ("address_display", "address"), ("owner_name", "owner"),
+        ("owner_phone", "phone"), ("owner_email", "email"),
+        ("contact_role", "contact"), ("category", "category"),
+        ("case_status", "status"), ("valuation", "valuation"),
+        ("apply_date", "filed"), ("case_number", "case"),
+    ],
 }
 
 CLUSTERS_SPEC = {
@@ -124,6 +136,17 @@ FROM sca_lead_clusters
     "date_col": "last_apply_date",
     "order_by": "max_lead_score DESC",
     "indexes": [("band", "top_band"), ("score", "max_lead_score")],
+    # The GC's actual call list: one row per project (deduped by parcel), ordered
+    # for calling — band/score first, then who to call and how to reach them.
+    "csv_file": "call_sheet.csv",
+    "csv_columns": [
+        ("top_band", "band"), ("max_lead_score", "score"),
+        ("address_display", "address"), ("owner_name", "owner"),
+        ("owner_phone", "phone"), ("owner_email", "email"),
+        ("contact_role", "contact"), ("categories", "categories"),
+        ("permit_count", "permits"), ("last_apply_date", "last_filed"),
+        ("main_parcel", "parcel"), ("primary_case_id", "case"),
+    ],
 }
 
 
@@ -189,6 +212,19 @@ def _insert_statements(spec, rows) -> list[str]:
     return stmts
 
 
+def _csv_rows(spec, rows) -> tuple[list[str], list[dict]]:
+    """Map fetched export rows (tuples in spec['columns'] order) to (headers,
+    list-of-dicts) for a human-readable call sheet. Pure -> unit-tested. The
+    SELECT fills columns in spec['columns'] order, so a name->index map lets the
+    curated csv_columns pull each value by source column."""
+    idx = {name: i for i, (name, _) in enumerate(spec["columns"])}
+    headers = [header for _, header in spec["csv_columns"]]
+    out = []
+    for r in rows:
+        out.append({header: r[idx[src]] for src, header in spec["csv_columns"]})
+    return headers, out
+
+
 def _prune_statement(spec, rows) -> str:
     """Mirror semantics: delete remote rows NOT in this export, so a lead that
     left the actionable set (e.g. issued/completed -> band DROP) doesn't linger
@@ -246,6 +282,15 @@ def main(args) -> int:
     finally:
         conn.close()
 
+    # Opt-in human-readable call sheet: the same actionable rows the D1 sync
+    # exports, written to a curated CSV the GC can open and call from directly.
+    if args.csv:
+        headers, csv_rows = _csv_rows(spec, rows)
+        csv_path = OUTPUTS_DIR / spec["csv_file"]
+        atomic_write_csv(csv_path, csv_rows, headers)
+        print(f"[step4] {spec['name']}: wrote call sheet {csv_path.relative_to(ROOT)} "
+              f"({len(csv_rows)} rows, bands={bands or 'ALL'}, since={args.since or 'ALL'})")
+
     schema, inserts = _schema_sql(spec), _insert_statements(spec, rows)
     prune = _prune_statement(spec, rows) if args.prune else None
     body = inserts + ([prune] if prune else [])
@@ -295,6 +340,10 @@ if __name__ == "__main__":
                    help="Append a DELETE so D1 mirrors exactly this export "
                         "(removes leads that left the actionable set). Cannot be "
                         "combined with --limit.")
+    p.add_argument("--csv", action="store_true",
+                   help="Also write a human-readable call sheet (CSV) of the same "
+                        "actionable rows -> outputs/step_4/call_sheet.csv (clusters) "
+                        "or call_sheet_leads.csv. Open in Excel and start calling.")
     p.add_argument("--execute", action="store_true",
                    help="POST to the D1 HTTP API using CF_* env vars (opt-in).")
     raise SystemExit(main(p.parse_args()))

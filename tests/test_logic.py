@@ -36,7 +36,8 @@ from step0b_refresh_stale import (stale_apply_days, refresh_floor,
                                    _at_risk_apply_dates, fetch_day_windows,
                                    MAX_CONSECUTIVE_ERRORS)
 from utils.step_0.fetch import SearchError
-from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUSTERS_SPEC
+from step4_sync_d1 import (_lit, _prune_statement, _fetch_rows, _csv_rows,
+                           LEADS_SPEC, CLUSTERS_SPEC)
 from tick import (should_refresh, should_skip_entirely, refresh_state_action,
                   _should_reclaim_lock, LOCK_STALE_SECONDS)
 from utils.step_2 import detail as detailmod
@@ -762,6 +763,40 @@ class SqlLiteral(unittest.TestCase):
         self.assertEqual(_lit("col1\tcol2"), "'col1 col2'")
         self.assertEqual(_lit("a\r\nb"), "'a  b'")
         self.assertEqual(_lit("café"), "'café'")  # unicode survives
+
+
+class CsvCallSheet(unittest.TestCase):
+    """--csv writes a curated call sheet: the same actionable rows, mapped from
+    the SELECT's column order to the call-friendly csv_columns by name."""
+
+    def test_csv_columns_reference_real_export_columns(self):
+        # Every csv source column must exist in the spec's export columns, else
+        # the name->index map would KeyError at runtime.
+        for spec in (LEADS_SPEC, CLUSTERS_SPEC):
+            export_cols = {name for name, _ in spec["columns"]}
+            for src, _header in spec["csv_columns"]:
+                self.assertIn(src, export_cols,
+                              f"{spec['name']}: csv col {src!r} not in export")
+
+    def test_csv_rows_maps_values_by_source_column(self):
+        # Build a fake fetched row in CLUSTERS_SPEC['columns'] order and confirm
+        # _csv_rows pulls each curated field from the right position.
+        spec = CLUSTERS_SPEC
+        col_order = [name for name, _ in spec["columns"]]
+        row = tuple(f"<{name}>" for name in col_order)  # sentinel per column
+        headers, dicts = _csv_rows(spec, [row])
+        self.assertEqual(headers,
+                         [h for _, h in spec["csv_columns"]])
+        # e.g. the 'address' header must carry the address_display value
+        self.assertEqual(dicts[0]["address"], "<address_display>")
+        self.assertEqual(dicts[0]["owner"], "<owner_name>")
+        self.assertEqual(dicts[0]["phone"], "<owner_phone>")
+        self.assertEqual(dicts[0]["band"], "<top_band>")
+
+    def test_csv_rows_empty_export(self):
+        headers, dicts = _csv_rows(CLUSTERS_SPEC, [])
+        self.assertEqual(dicts, [])
+        self.assertTrue(headers)  # headers always present (for an empty sheet)
 
 
 class PruneStatement(unittest.TestCase):

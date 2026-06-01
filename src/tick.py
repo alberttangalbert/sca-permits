@@ -496,7 +496,9 @@ def _run_pipeline(args, start_year, end_year, years, since,
         # the actionable set (issued/completed -> DROP) are removed, not left
         # stale. Safe here -- the tick exports the full set (no --limit).
         for label, extra in (("leads", []), ("project clusters", ["--clusters"])):
-            sync_args = [str(SRC / "step4_sync_d1.py"), *extra, "--prune"]
+            # --csv also refreshes the human-readable call sheet each tick, so the
+            # GC always has a current outputs/step_4/call_sheet.csv to call from.
+            sync_args = [str(SRC / "step4_sync_d1.py"), *extra, "--prune", "--csv"]
             if args.execute_sync:
                 sync_args.append("--execute")
             run_step(f"step4: sync {label} to D1", sync_args,
