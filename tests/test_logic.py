@@ -43,6 +43,7 @@ from tick import (should_refresh, should_skip_entirely, refresh_state_action,
 from utils.step_2 import detail as detailmod
 from utils.step_0 import fetch as fetchmod
 from utils.io import apply_migrations, load_run_ledger
+from healthcheck import migration_set_status
 
 
 class TypeFit(unittest.TestCase):
@@ -1531,6 +1532,39 @@ class ApplyMigrations(unittest.TestCase):
             self.assertEqual(apply_migrations(conn, Path(d)), ["0002_b.sql"])
             cols = {r[1] for r in conn.execute("PRAGMA table_info(t)")}
             self.assertEqual(cols, {"id", "name"})
+
+
+class MigrationSetStatus(unittest.TestCase):
+    """The healthcheck migration invariant compares the SET of applied filenames
+    to the SET on disk -- a count-only check (applied == on_disk) passes when the
+    sets drift but stay equal-sized, leaving the schema silently wrong."""
+
+    def test_in_sync_passes(self):
+        files = {"0001_a.sql", "0002_b.sql"}
+        ok, detail = migration_set_status(files, files)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "2 applied / 2 on disk")
+
+    def test_unapplied_file_fails_and_is_named(self):
+        ok, detail = migration_set_status({"0001_a.sql"},
+                                          {"0001_a.sql", "0002_b.sql"})
+        self.assertFalse(ok)
+        self.assertIn("UNAPPLIED: 0002_b.sql", detail)
+
+    def test_orphaned_applied_file_fails_and_is_named(self):
+        # A migration recorded as applied but whose file is gone from disk.
+        ok, detail = migration_set_status({"0001_a.sql", "0002_b.sql"},
+                                          {"0001_a.sql"})
+        self.assertFalse(ok)
+        self.assertIn("APPLIED-BUT-MISSING: 0002_b.sql", detail)
+
+    def test_equal_counts_but_disjoint_sets_still_fails(self):
+        # The exact false-confidence case a count check (1 == 1) would miss:
+        # one file renamed/replaced -> one unapplied + one orphaned, counts match.
+        ok, detail = migration_set_status({"0002_old.sql"}, {"0002_new.sql"})
+        self.assertFalse(ok)
+        self.assertIn("UNAPPLIED: 0002_new.sql", detail)
+        self.assertIn("APPLIED-BUT-MISSING: 0002_old.sql", detail)
 
 
 if __name__ == "__main__":

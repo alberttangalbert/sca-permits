@@ -132,6 +132,22 @@ COUNT_CHECKS = [
 ]
 
 
+def migration_set_status(applied_files: set, on_disk_files: set) -> tuple[bool, str]:
+    """(ok, detail) for the migrations invariant: the set of applied filenames
+    must equal the set of *.sql files on disk. Pure (no DB / FS) so the drift
+    cases are unit-testable. `ok` is False when any on-disk file is unapplied OR
+    any applied file is gone from disk; the detail names the offenders so a
+    tripped check is actionable rather than a bare count mismatch."""
+    unapplied = sorted(on_disk_files - applied_files)
+    orphaned = sorted(applied_files - on_disk_files)
+    detail = f"{len(applied_files)} applied / {len(on_disk_files)} on disk"
+    if unapplied:
+        detail += f"; UNAPPLIED: {', '.join(unapplied)}"
+    if orphaned:
+        detail += f"; APPLIED-BUT-MISSING: {', '.join(orphaned)}"
+    return (not unapplied and not orphaned), detail
+
+
 def _consistency_checks(conn) -> list[tuple]:
     """Cross-table invariants that need more than a single count. Returns
     (severity, label, ok, detail) tuples."""
@@ -162,10 +178,18 @@ def _consistency_checks(conn) -> list[tuple]:
     out.append(("FAIL", "leads: lead_band matches band(lead_score)",
                 mismatched == 0, f"{mismatched} mismatched"))
 
-    applied = conn.execute("SELECT COUNT(*) FROM _schema_migrations").fetchone()[0]
-    on_disk = len(list(MIGRATIONS_DIR.glob("*.sql")))
-    out.append(("FAIL", "migrations: all on-disk files applied",
-                applied == on_disk, f"{applied} applied / {on_disk} files"))
+    # Compare the SET of applied filenames against the SET on disk, not just the
+    # counts. A count check (applied == on_disk) gives false confidence when the
+    # sets drift but happen to stay equal-sized -- e.g. an applied migration's
+    # file is renamed/replaced while a new one is added (1 missing + 1 extra ->
+    # counts still match, schema silently wrong). The set diff also names the
+    # offending files, so a tripped check is actionable ("run the pipeline to
+    # apply 0005_x.sql") instead of a bare "3 applied / 4 files".
+    applied_files = {row[0] for row in
+                     conn.execute("SELECT filename FROM _schema_migrations")}
+    on_disk_files = {f.name for f in MIGRATIONS_DIR.glob("*.sql")}
+    mig_ok, mig_detail = migration_set_status(applied_files, on_disk_files)
+    out.append(("FAIL", "migrations: applied set == on-disk set", mig_ok, mig_detail))
 
     bands = dict(conn.execute(
         "SELECT lead_band, COUNT(*) FROM sca_leads GROUP BY lead_band").fetchall())
