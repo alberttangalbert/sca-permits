@@ -58,6 +58,14 @@ def refresh_floor(today: dt.date, refresh_years: int) -> str:
     return f"{today.year - refresh_years + 1}-01-01"
 
 
+# Stop the day-window loop after this many CONSECUTIVE portal errors. A burst of
+# errors means the portal is rate-limiting/blocking (observed 2026-06-01: anonymous
+# search 403'd under cumulative daily load), so grinding through the remaining days
+# would just hammer an active block and deepen it. Bail politely; the unrefreshed
+# days simply wait for a future fire.
+MAX_CONSECUTIVE_ERRORS = 3
+
+
 def stale_apply_days(apply_dates) -> list[dt.date]:
     """Distinct ApplyDate calendar days (sorted) from the at-risk leads' apply_date
     strings. Skips blank/unparseable values (a lead with no apply_date isn't
@@ -72,6 +80,36 @@ def stale_apply_days(apply_dates) -> list[dt.date]:
         except (ValueError, TypeError):
             continue
     return sorted(days)
+
+
+def fetch_day_windows(days, fetch_one_day, log=print, sleep=time.sleep,
+                      delay=0.0) -> dict:
+    """Fetch each day-window via fetch_one_day(day), stopping early after
+    MAX_CONSECUTIVE_ERRORS consecutive failures (the portal is rate-limiting, so
+    further requests just hammer an active block). fetch_one_day raises SearchError
+    on failure. Pure control loop (fetch + sleep injected) so the early-abort is
+    unit-tested without a portal. Returns {attempted, errors, aborted}."""
+    consecutive = 0
+    errors = []
+    aborted = False
+    attempted = 0
+    for d in days:
+        attempted += 1
+        try:
+            fetch_one_day(d)
+            consecutive = 0
+        except SearchError as exc:
+            errors.append({"day": d.isoformat(), "error": str(exc)})
+            consecutive += 1
+            log(f"  [{d.isoformat()}] ERROR: {exc}")
+            if consecutive >= MAX_CONSECUTIVE_ERRORS:
+                aborted = True
+                log(f"  aborting: {consecutive} consecutive portal errors "
+                    f"(rate-limited?); remaining day-windows deferred to a "
+                    f"future fire.")
+                break
+        sleep(delay)
+    return {"attempted": attempted, "errors": errors, "aborted": aborted}
 
 
 def _at_risk_apply_dates(conn, floor: str) -> list[str]:
@@ -140,19 +178,19 @@ def main(args) -> int:
         "floor": floor, "windows": [], "sum_window_counts": 0,
         "pages_fetched": 0, "pages_skipped": 0, "records_seen": 0, "errors": [],
     }
+    def fetch_one_day(d):
+        # no_cache=True: we WANT fresh statuses, overwriting any prior day-window
+        # pages for this date. _fetch_window records its own audit fields.
+        _fetch_window(session, filter_module, sort_by, d, d, raw_dir,
+                      DEFAULT_PAGE_SIZE, args.page_delay, True, audit, print)
+
     try:
-        for d in days:
-            try:
-                # no_cache=True: we WANT fresh statuses, overwriting any prior
-                # day-window pages for this date.
-                _fetch_window(session, filter_module, sort_by, d, d, raw_dir,
-                              DEFAULT_PAGE_SIZE, args.page_delay, True, audit, print)
-            except SearchError as exc:
-                audit["errors"].append({"day": d.isoformat(), "error": str(exc)})
-                print(f"  [{d.isoformat()}] ERROR: {exc}")
-            time.sleep(args.page_delay)
+        outcome = fetch_day_windows(days, fetch_one_day, log=print,
+                                    sleep=time.sleep, delay=args.page_delay)
     finally:
         session.close()
+    audit["errors"].extend(outcome["errors"])
+    audit["aborted_on_errors"] = outcome["aborted"]
 
     finished = dt.datetime.now().astimezone().replace(microsecond=0)
     print(f"  re-pulled {audit['pages_fetched']} page(s) across {len(days)} day-window(s); "

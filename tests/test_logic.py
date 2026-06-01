@@ -33,7 +33,9 @@ from step2_fetch_details import select_case_ids
 from step2_parse_details import unparsed_files, _read_cached_detail
 from step1_parse_search_results import _parse_pages
 from step0b_refresh_stale import (stale_apply_days, refresh_floor,
-                                   _at_risk_apply_dates)
+                                   _at_risk_apply_dates, fetch_day_windows,
+                                   MAX_CONSECUTIVE_ERRORS)
+from utils.step_0.fetch import SearchError
 from step4_sync_d1 import _lit, _prune_statement, _fetch_rows, LEADS_SPEC, CLUSTERS_SPEC
 from tick import (should_refresh, should_skip_entirely, refresh_state_action,
                   _should_reclaim_lock, LOCK_STALE_SECONDS)
@@ -1164,6 +1166,46 @@ class StaleRefresh(unittest.TestCase):
         c = sqlite3.connect(":memory:")
         self.addCleanup(c.close)
         self.assertEqual(_at_risk_apply_dates(c, "2025-01-01"), [])
+
+    def test_day_loop_all_succeed(self):
+        days = [dt.date(2024, 1, i) for i in range(1, 6)]
+        fetched = []
+        out = fetch_day_windows(days, fetched.append, log=lambda *_: None,
+                                sleep=lambda *_: None)
+        self.assertEqual(out["attempted"], 5)
+        self.assertFalse(out["aborted"])
+        self.assertEqual(len(fetched), 5)
+
+    def test_day_loop_aborts_after_consecutive_portal_errors(self):
+        # The portal rate-limits (real 2026-06-01 403): once it starts blocking,
+        # stop hammering -- don't grind through all remaining day-windows.
+        days = [dt.date(2024, 1, i) for i in range(1, 21)]
+        attempts = []
+
+        def always_403(d):
+            attempts.append(d)
+            raise SearchError("HTTP 403")
+        out = fetch_day_windows(days, always_403, log=lambda *_: None,
+                                sleep=lambda *_: None)
+        self.assertTrue(out["aborted"])
+        self.assertEqual(out["attempted"], MAX_CONSECUTIVE_ERRORS)  # stopped early
+        self.assertEqual(len(attempts), MAX_CONSECUTIVE_ERRORS)     # not all 20
+
+    def test_day_loop_resets_run_on_intermittent_error(self):
+        # A single failure between successes must NOT abort -- only a CONSECUTIVE
+        # run of errors means an active block.
+        days = [dt.date(2024, 1, i) for i in range(1, 8)]
+        seen = []
+
+        def fail_on_third(d):
+            seen.append(d)
+            if d.day == 3:
+                raise SearchError("HTTP 500 blip")
+        out = fetch_day_windows(days, fail_on_third, log=lambda *_: None,
+                                sleep=lambda *_: None)
+        self.assertFalse(out["aborted"])
+        self.assertEqual(out["attempted"], 7)        # all attempted
+        self.assertEqual(len(out["errors"]), 1)
 
 
 class LockReclaim(unittest.TestCase):
