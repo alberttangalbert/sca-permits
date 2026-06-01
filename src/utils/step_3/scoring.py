@@ -96,7 +96,14 @@ def classify_type(case_type: str | None, description: str | None) -> tuple[float
         if rule["match"] in t:
             type_fit, category = rule["type_fit"], rule["category"]
             break
-    if category == "OTHER":
+    # ACCESSORY is upgrade-eligible alongside OTHER: an "Accessory Structure"
+    # permit whose description names a real ADU/addition/remodel (e.g. "NEW
+    # DETACHED ADU, 500-SQFT") should still promote to that specific, higher-fit
+    # category exactly as it did when accessory structures lived in OTHER —
+    # otherwise relabeling the base category to ACCESSORY would silently drop
+    # those leads' scores. Only accessory structures with NO upgrade keyword
+    # (patio covers, retaining walls, detached studios) keep the ACCESSORY label.
+    if category in ("OTHER", "ACCESSORY"):
         d = (description or "").lower()
         for keywords, fit, cat in _DESC_UPGRADES:
             if any(k in d for k in keywords):

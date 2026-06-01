@@ -16,7 +16,7 @@
     { "match": "interior remodel", "type_fit": 0.75, "category": "REMODEL" },
     { "match": "kitchen remodel", "type_fit": 0.6, "category": "REMODEL" },
     { "match": "bathroom remodel", "type_fit": 0.4, "category": "REMODEL" },
-    { "match": "accessory structure", "type_fit": 0.7, "category": "OTHER" },
+    { "match": "accessory structure", "type_fit": 0.7, "category": "ACCESSORY" },
     { "match": "demolition", "type_fit": 0.45, "category": "OTHER" },
     { "match": "multi-residential", "type_fit": 0.5, "category": "COMMERCIAL" },
     { "match": "apartment", "type_fit": 0.5, "category": "COMMERCIAL" },

@@ -82,6 +82,29 @@ class TypeFit(unittest.TestCase):
         fit, cat = classify_type("Building Residential - Reroof", "reroof over addition")
         self.assertEqual((fit, cat), (0.1, "SUBTRADE"))
 
+    def test_accessory_structure_is_its_own_category(self):
+        # A plain accessory structure (patio cover / detached studio / retaining
+        # wall) gets the ACCESSORY label, not the OTHER catch-all — same 0.7 fit.
+        self.assertEqual(
+            classify_type("Building Residential-Accessory Structure",
+                          "Attached Patio Cover; Freestanding Patio Cover"),
+            (0.7, "ACCESSORY"))
+
+    def test_accessory_structure_still_upgrades_to_specific_category(self):
+        # Score-neutrality guard: an accessory structure whose description names a
+        # real ADU must STILL promote to ADU (fit 1.0), exactly as it did when
+        # accessory structures lived in OTHER — relabeling the base category must
+        # not silently drop these leads' scores.
+        self.assertEqual(
+            classify_type("Building Residential-Accessory Structure",
+                          "NEW DETACHED ADU, 500-SQFT"),
+            (1.0, "ADU"))
+        # A commercial accessory structure still reads COMMERCIAL (the 'commercial'
+        # rule precedes 'accessory structure' in the ordered ruleset).
+        self.assertEqual(
+            classify_type("Building Commercial-Accessory Structure", "tent"),
+            (0.2, "COMMERCIAL"))
+
 
 class Roles(unittest.TestCase):
     def test_agent_for_owner_is_agent_not_owner(self):  # bug #16
