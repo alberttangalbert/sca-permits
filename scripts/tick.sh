@@ -16,6 +16,18 @@ if [ -f venv/bin/activate ]; then
   source venv/bin/activate
 fi
 
+# Load .env if present. cron/launchd run with a bare environment that doesn't
+# source it, and src/tick.py -> step4_sync_d1.py reads CF_ACCOUNT_ID /
+# CF_D1_DATABASE_ID / CF_API_TOKEN straight from os.environ (no dotenv loader).
+# Without this, `tick.sh --execute-sync` aborts the D1 push with "no CF_API_TOKEN
+# in the environment". Matches the sibling cup-/scl-permits tick.sh.
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 ts="$(date +%Y%m%d_%H%M%S)"
 log="logs/tick_${ts}.log"
 echo "[tick.sh] starting $(date -Iseconds) -> ${log}"
