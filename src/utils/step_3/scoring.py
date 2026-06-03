@@ -86,6 +86,20 @@ _DESC_UPGRADES = [
 BANDS = (("HIGH", 0.50), ("MEDIUM", 0.22), ("LOW", 0.07))  # else DROP
 
 
+def _desc_kw_match(keyword: str, description_lower: str) -> bool:
+    """Substring keyword match for the _DESC_UPGRADES table, with one guard:
+    the 'addition' keyword must NOT fire on 'additional' (an adjective meaning
+    'extra', not a build-out) -- a naive substring match miscategorized bathroom
+    remodels with 'additional required elements per code' as ADDITION leads,
+    inflating their type_fit 0.6 -> 0.9 (audit 2026-06-02). The negative
+    lookahead still matches the real word 'addition' AND its plural 'additions'.
+    Every other keyword keeps lenient substring matching (so 'remodel' still
+    catches 'remodeling', ' adu' still catches '(adu)', etc.)."""
+    if keyword == "addition":
+        return re.search(r"addition(?!al)", description_lower) is not None
+    return keyword in description_lower
+
+
 def classify_type(case_type: str | None, description: str | None) -> tuple[float, str]:
     """(type_fit, category) from the ordered rules; misc/unknown rows get a
     description-keyword upgrade so a real ADU/addition mistyped as 'Miscellaneous'
@@ -106,7 +120,7 @@ def classify_type(case_type: str | None, description: str | None) -> tuple[float
     if category in ("OTHER", "ACCESSORY"):
         d = (description or "").lower()
         for keywords, fit, cat in _DESC_UPGRADES:
-            if any(k in d for k in keywords):
+            if any(_desc_kw_match(k, d) for k in keywords):
                 return max(type_fit, fit), cat
     return type_fit, category
 
@@ -204,11 +218,19 @@ _PLACEHOLDER_NAMES = {"void void", "builder owner", "test test", "redacted redac
 # Migration-era stamps like 'EnerGov 2009Q2' / 'EnerGov 2024Q4': "energov" +
 # space + 4-digit year + 'q' + quarter digit. Match the lowercased name.
 _ENERGOV_MIGRATION_NAME = re.compile(r"^energov\s+\d{4}q[1-4]$")
+# The migration stamp's COMPANY (the 'EnerGov YYYYQN' rows all carry it). Checked
+# in addition to the name so a placeholder can't slip through the company path:
+# property_owner_name falls back to a contact's company when its full_name is
+# blank, so a name-only filter would leak a blank-name + placeholder-company row.
+_PLACEHOLDER_COMPANIES = {"energov conversion"}
 
 
 def _is_placeholder(c: dict) -> bool:
     name = (c.get("full_name") or "").strip().lower()
-    return name in _PLACEHOLDER_NAMES or bool(_ENERGOV_MIGRATION_NAME.match(name))
+    if name in _PLACEHOLDER_NAMES or _ENERGOV_MIGRATION_NAME.match(name):
+        return True
+    company = (c.get("company") or "").strip().lower()
+    return company in _PLACEHOLDER_COMPANIES
 
 
 # Source-data hygiene helpers (added 2026-05-29). EnerGov contact rows
@@ -224,21 +246,37 @@ def _email_usable(s: str | None) -> bool:
     return bool(s) and bool(_EMAIL_RE.match(s.strip()))
 
 
-def _phone_usable(s: str | None) -> bool:
+# San Carlos is wholly in San Mateo County (area code 650). The legacy EnerGov
+# import stripped the area code from many owner phones, leaving a bare 7-digit
+# local number; recover those rather than discard them (audit 2026-06-02:
+# ~377 actionable leads were unreachable solely because of this).
+_DEFAULT_AREA_CODE = "650"
+
+
+def _normalize_phone(s: str | None) -> str | None:
+    """Digits-only phone, recovering 7-digit (area-code-stripped) legacy numbers
+    by prepending the county area code. Returns None if not a plausible number."""
     if not s:
-        return False
+        return None
     digits = re.sub(r"\D", "", s)
+    if len(digits) == 7:                     # legacy local number, no area code
+        digits = _DEFAULT_AREA_CODE + digits
     # 10 = US local + area code; 11 = with country prefix; up to 15 = E.164.
-    return 10 <= len(digits) <= 15
+    return digits if 10 <= len(digits) <= 15 else None
+
+
+def _phone_usable(s: str | None) -> bool:
+    return _normalize_phone(s) is not None
 
 
 def _usable_contact(c: dict) -> dict:
-    """Return a view of the contact with unusable email/phone NULL'd out, so
-    'IGOR@SLUTSKER@GMAIL.COM' or a 7-digit 'phone' can't beat a real entry."""
+    """Return a view of the contact with unusable email/phone NULL'd out (and the
+    phone normalized), so 'IGOR@SLUTSKER@GMAIL.COM' or a 3-digit 'phone' can't
+    beat a real entry, while a recoverable 7-digit local number is kept."""
     return {
         **c,
         "email": c.get("email") if _email_usable(c.get("email")) else None,
-        "phone": c.get("phone") if _phone_usable(c.get("phone")) else None,
+        "phone": _normalize_phone(c.get("phone")),
     }
 
 
@@ -310,11 +348,25 @@ def pick_contacts(contacts: list[dict]) -> dict:
                 break
 
     contractor = best(contractors)
+    # The actual property owner's NAME, independent of the outreach pick above.
+    # owner_name is WHO TO CALL FIRST (often a reachable designer/architect when
+    # the owner row has no email/phone); property_owner_name is WHO OWNS THE
+    # PROPERTY. They differ on 71 actionable leads (audit 2026-06-01) where a
+    # named-but-contactless OWNER row lost the fallback to a reachable non-owner
+    # -- dropping the homeowner's name entirely. Surfaced even when unreachable:
+    # paired with the address it drives reverse-lookup / direct-mail / a door
+    # knock. Prefer the strongest OWNER row's name, company as a last resort;
+    # NULL when no (non-placeholder) named owner row exists on the permit.
+    owner_row = best_by_role["OWNER"]
+    property_owner_name = (((owner_row or {}).get("full_name")
+                            or (owner_row or {}).get("company"))
+                           if owner_row else None)
     return {
         "owner_name": (contact or {}).get("full_name") or (contact or {}).get("company"),
         "owner_email": (contact or {}).get("email"),
         "owner_phone": (contact or {}).get("phone"),
         "contact_role": contact_role,
+        "property_owner_name": property_owner_name,
         "contractor_name": ((contractor or {}).get("company")
                             or (contractor or {}).get("full_name")) if contractor else None,
         "has_contractor": 1 if contractors else 0,

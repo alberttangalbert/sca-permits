@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from utils.normalize import split_address
 from utils.step_1.parsing import map_entity, parse_page
 from utils.step_2.parsing import (_custom_fields, _fnum, _holds_summary,
-                                   normalize_role, parse_detail)
+                                   normalize_role, parse_detail, parse_contacts)
 from utils.step_3.clustering import (aggregate, canonical_parcel_by_address,
                                       cluster_key)
 from utils.step_3.scoring import (band, classify_type, pick_contacts,
@@ -37,12 +37,15 @@ from step0b_refresh_stale import (stale_apply_days, refresh_floor,
                                    MAX_CONSECUTIVE_ERRORS)
 from utils.step_0.fetch import SearchError
 from step4_sync_d1 import (_lit, _prune_statement, _fetch_rows, _csv_rows,
-                           LEADS_SPEC, CLUSTERS_SPEC)
+                           LEADS_SPEC, CLUSTERS_SPEC, _reengagement_rows,
+                           REENGAGEMENT_COLUMNS)
 from tick import (should_refresh, should_skip_entirely, refresh_state_action,
-                  _should_reclaim_lock, LOCK_STALE_SECONDS)
+                  escalated_backoff_minutes, OUTAGE_BACKOFF_MINUTES,
+                  MAX_OUTAGE_BACKOFF_MINUTES, _should_reclaim_lock,
+                  LOCK_STALE_SECONDS)
 from utils.step_2 import detail as detailmod
 from utils.step_0 import fetch as fetchmod
-from utils.io import apply_migrations, load_run_ledger
+from utils.io import apply_migrations, load_run_ledger, LEDGER_MAX_RUNS
 from healthcheck import migration_set_status
 
 
@@ -89,6 +92,31 @@ class TypeFit(unittest.TestCase):
         # An explicit sub-trade is NOT upgraded by a stray description word.
         fit, cat = classify_type("Building Residential - Reroof", "reroof over addition")
         self.assertEqual((fit, cat), (0.1, "SUBTRADE"))
+
+    def test_additional_does_not_false_upgrade_to_addition(self):
+        # 'additional' is an adjective ('extra'), not a build-out: a bathroom
+        # remodel must NOT inflate to ADDITION (0.9) off the substring (audit
+        # 2026-06-02). It should land REMODEL via the 'remodel' keyword.
+        self.assertEqual(
+            classify_type("Building Residential-Miscellaneous",
+                          "Bathroom remodeling AND ADDITIONAL ELEMENTS PER CODE"),
+            (0.6, "REMODEL"))
+        # ...and with no other keyword, 'additional' alone leaves it at base.
+        self.assertEqual(
+            classify_type("Building Residential-Miscellaneous",
+                          "additional required elements per code"),
+            (0.25, "OTHER"))
+
+    def test_real_addition_singular_and_plural_still_upgrade(self):
+        # The fix must not regress genuine additions, singular OR plural.
+        self.assertEqual(
+            classify_type("Building Residential-Miscellaneous",
+                          "703 SF ADDITION to the residence"),
+            (0.9, "ADDITION"))
+        self.assertEqual(
+            classify_type("Building Residential-Miscellaneous",
+                          "two-story additions at front and rear"),
+            (0.9, "ADDITION"))
 
     def test_accessory_structure_is_its_own_category(self):
         # A plain accessory structure (patio cover / detached studio / retaining
@@ -233,6 +261,52 @@ class Contacts(unittest.TestCase):
              "phone": "555-1234567"}])
         self.assertEqual(picked["owner_phone"], "555-1234567")
         self.assertEqual(picked["owner_name"], "Reachable App")
+        # ...but the real homeowner's NAME must NOT be lost: it rides along on
+        # property_owner_name so the GC can still reverse-lookup / mail / knock.
+        self.assertEqual(picked["property_owner_name"], "Nameonly Owner")
+
+    def test_property_owner_name_independent_of_outreach_pick(self):
+        # The surfaced outreach contact is a reachable designer; the owner row is
+        # a different, contactless person. owner_name = the designer (who to call
+        # first), property_owner_name = the actual homeowner.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "James Waterbury", "email": None,
+             "phone": None},
+            {"role": "DESIGNER", "full_name": "Natalie Hyland",
+             "company": "Hyland Design Group", "email": "info@hylanddg.com",
+             "phone": "555-9999999"}])
+        self.assertEqual(picked["owner_name"], "Natalie Hyland")
+        self.assertEqual(picked["contact_role"], "DESIGNER")
+        self.assertEqual(picked["property_owner_name"], "James Waterbury")
+
+    def test_property_owner_name_none_when_no_owner_row(self):
+        # No OWNER role on the permit -> nothing to carry (not the designer's name).
+        picked = pick_contacts([
+            {"role": "APPLICANT", "full_name": "Some Applicant",
+             "email": "a@x.com", "phone": None}])
+        self.assertIsNone(picked["property_owner_name"])
+
+    def test_property_owner_name_ignores_placeholder_owner(self):
+        # An EnerGov-conversion placeholder owner is not a real name.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "EnerGov 2023Q4",
+             "company": "EnerGov Conversion",
+             "email": "energovconversion2023Q4@tylertech.com", "phone": None},
+            {"role": "APPLICANT", "full_name": "Real App", "email": "a@x.com",
+             "phone": None}])
+        self.assertIsNone(picked["property_owner_name"])
+
+    def test_property_owner_name_ignores_placeholder_company_blank_name(self):
+        # Defense-in-depth: property_owner_name falls back to a contact's COMPANY
+        # when full_name is blank, so a placeholder company ('EnerGov Conversion')
+        # on a name-less OWNER row must still be filtered (else it leaks past the
+        # name-only check). Independent review, 2026-06-02.
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "", "company": "EnerGov Conversion",
+             "email": None, "phone": None},
+            {"role": "APPLICANT", "full_name": "Real App", "email": "a@x.com",
+             "phone": None}])
+        self.assertIsNone(picked["property_owner_name"])
 
     def test_reachable_owner_still_wins_over_applicant(self):
         # When the owner IS reachable, keep preferring the owner.
@@ -499,6 +573,22 @@ class Clustering(unittest.TestCase):
                          ("A:123 main", "ADDRESS"))
         self.assertEqual(cluster_key("  ", "", "CID"), ("C:CID", "SINGLETON"))
 
+    def test_address_unit_splits_multifamily(self):
+        # NULL-parcel permits in a multifamily building must key PER UNIT, not by
+        # the bare street (which over-collapsed 14 units of "1 LAUREL ST" into one
+        # bogus project). A unit-less address (single-family norm) is unchanged.
+        self.assertEqual(cluster_key(None, "1 laurel st", "C1", "201"),
+                         ("A:1 laurel st|201", "ADDRESS"))
+        self.assertEqual(cluster_key(None, "1 laurel st", "C2", "202"),
+                         ("A:1 laurel st|202", "ADDRESS"))
+        self.assertEqual(cluster_key(None, "123 main", "C3", None),
+                         ("A:123 main", "ADDRESS"))
+        self.assertEqual(cluster_key(None, "123 main", "C4", "  "),
+                         ("A:123 main", "ADDRESS"))
+        # A real parcel still wins over address+unit.
+        self.assertEqual(cluster_key("050011210", "1 laurel st", "C5", "201"),
+                         ("P:050011210", "PARCEL"))
+
     def test_lone_street_suffix_is_singleton(self):
         # 'DR', 'AVE', 'BLVD' etc. by themselves are EnerGov data-entry
         # leftovers, not real address keys. They must NOT cluster two
@@ -638,6 +728,21 @@ class CustomFieldsAndHolds(unittest.TestCase):
         self.assertEqual(d["active_hold_count"], 1)
         self.assertEqual(d["blocking_hold_count"], 1)
 
+    def test_parse_detail_tolerates_wrong_typed_list_fields(self):
+        # Schema drift / malformed 200: a list field returned as a truthy non-list
+        # (string/int/dict) must degrade to 'no rows / 0 count', not crash the
+        # whole step2 parse (parse_detail isn't wrapped per-record).
+        result = {"ValuationValue": 100.0, "Contacts": "notalist",
+                  "CustomFields": 7, "Holds": {"x": 1}, "Parcels": "p",
+                  "Attachments": 3, "Addresses": "a"}
+        d = parse_detail(result, "CID")
+        self.assertEqual(d["valuation"], 100.0)   # scalar still read
+        self.assertEqual((d["contact_count"], d["hold_count"],
+                          d["parcel_count"], d["attachment_count"]), (0, 0, 0, 0))
+        self.assertIsNone(d["main_parcel"])
+        self.assertIsNone(d["additional_sqft"])
+        self.assertEqual(parse_contacts(result, "CID"), [])
+
 
 class AddressNormalization(unittest.TestCase):
     def test_strips_city_tail(self):
@@ -744,6 +849,12 @@ class Step1Parsing(unittest.TestCase):
         self.assertEqual(row["address_display"], "5 B AVE SAN CARLOS CA 94070")
         self.assertEqual(row["address_norm"], "5 B AVE")
 
+    def test_parse_page_tolerates_wrong_typed_entityresults(self):
+        # Schema drift / malformed 200: EntityResults a non-list must degrade to
+        # 'no rows', not crash map_entity's .get() and poison the parse.
+        for bad in ("notalist", 42, {"a": 1}, None):
+            self.assertEqual(parse_page({"EntityResults": bad}, "Permit", 1), [])
+
 
 class SqlLiteral(unittest.TestCase):
     def test_lit_escaping(self):
@@ -764,6 +875,14 @@ class SqlLiteral(unittest.TestCase):
         self.assertEqual(_lit("col1\tcol2"), "'col1 col2'")
         self.assertEqual(_lit("a\r\nb"), "'a  b'")
         self.assertEqual(_lit("café"), "'café'")  # unicode survives
+
+    def test_lit_nan_and_inf_become_null(self):
+        # repr(nan)/repr(inf) emit bare 'nan'/'inf' tokens that break the whole
+        # INSERT batch on SQLite/D1. They have no SQL literal -> NULL them.
+        self.assertEqual(_lit(float("nan")), "NULL")
+        self.assertEqual(_lit(float("inf")), "NULL")
+        self.assertEqual(_lit(float("-inf")), "NULL")
+        self.assertEqual(_lit(0.0), "0.0")   # ordinary floats unaffected
 
 
 class CsvCallSheet(unittest.TestCase):
@@ -790,7 +909,8 @@ class CsvCallSheet(unittest.TestCase):
                          [h for _, h in spec["csv_columns"]])
         # e.g. the 'address' header must carry the address_display value
         self.assertEqual(dicts[0]["address"], "<address_display>")
-        self.assertEqual(dicts[0]["owner"], "<owner_name>")
+        self.assertEqual(dicts[0]["outreach_contact"], "<owner_name>")
+        self.assertEqual(dicts[0]["property_owner"], "<property_owner_name>")
         self.assertEqual(dicts[0]["phone"], "<owner_phone>")
         self.assertEqual(dicts[0]["band"], "<top_band>")
 
@@ -840,14 +960,15 @@ class ExportSinceFloor(unittest.TestCase):
                 additional_sqft REAL, num_stories REAL, construction_type TEXT,
                 blocking_hold INTEGER, has_contractor INTEGER, owner_name TEXT,
                 owner_email TEXT, owner_phone TEXT, contact_role TEXT,
-                contractor_name TEXT,
+                property_owner_name TEXT, contractor_name TEXT,
                 scored_at TEXT, cluster_id TEXT, cluster_key_type TEXT);
             CREATE TABLE sca_lead_clusters (cluster_id TEXT PRIMARY KEY,
                 key_type TEXT, permit_count INTEGER, max_lead_score REAL,
                 top_band TEXT, categories TEXT, total_valuation REAL,
                 max_valuation REAL, primary_case_id TEXT, address_display TEXT,
                 main_parcel TEXT, owner_name TEXT, owner_email TEXT,
-                owner_phone TEXT, contact_role TEXT, has_contractor INTEGER,
+                owner_phone TEXT, contact_role TEXT, property_owner_name TEXT,
+                has_contractor INTEGER,
                 first_apply_date TEXT, last_apply_date TEXT);
         """)
         # 3 permits: pre-cutoff zombie, post-cutoff live, NULL-date oddball.
@@ -1139,6 +1260,81 @@ class TickCadence(unittest.TestCase):
         recent_success = self.NOW - dt.timedelta(hours=2)
         self.assertFalse(should_refresh(False, recent_success, self.NOW, 6.0,
                                         last_failure=None))
+
+
+class TestEscalatedBackoff(unittest.TestCase):
+    """The outage backoff widens with consecutive failures so a sustained portal
+    block (the 403 can last hours) is re-poked far less often than a one-off."""
+
+    def test_first_failure_uses_base_window(self):
+        # 0 or 1 consecutive failures -> the original flat 30-min window, so a
+        # single blip behaves exactly as before (no regression).
+        self.assertEqual(escalated_backoff_minutes(0), OUTAGE_BACKOFF_MINUTES)
+        self.assertEqual(escalated_backoff_minutes(1), OUTAGE_BACKOFF_MINUTES)
+
+    def test_window_doubles_each_consecutive_failure(self):
+        self.assertEqual(escalated_backoff_minutes(2), 60)
+        self.assertEqual(escalated_backoff_minutes(3), 120)
+        self.assertEqual(escalated_backoff_minutes(4), 240)
+
+    def test_window_is_capped(self):
+        # Beyond the cap the wait stops growing (never wait absurdly long, and
+        # never overflow into multi-day silence).
+        self.assertEqual(escalated_backoff_minutes(5), MAX_OUTAGE_BACKOFF_MINUTES)
+        self.assertEqual(escalated_backoff_minutes(99), MAX_OUTAGE_BACKOFF_MINUTES)
+
+    def test_negative_or_garbage_count_is_safe(self):
+        # A corrupt/negative counter must not crash or produce a sub-base wait.
+        self.assertEqual(escalated_backoff_minutes(-3), OUTAGE_BACKOFF_MINUTES)
+
+    def test_escalated_window_keeps_refresh_skipped_longer(self):
+        # End-to-end: after 3 consecutive failures the effective window is 2h, so
+        # a failure 45 min ago (which a flat 30-min backoff would have cleared)
+        # still suppresses the refresh.
+        last_success = self.NOW - dt.timedelta(hours=8)
+        last_failure = self.NOW - dt.timedelta(minutes=45)
+        eff = escalated_backoff_minutes(3)   # 120 min
+        self.assertFalse(should_refresh(False, last_success, self.NOW, 6.0,
+                                        last_failure=last_failure,
+                                        outage_backoff_minutes=eff))
+
+    NOW = dt.datetime(2026, 6, 1, 12, 0, 0,
+                      tzinfo=dt.timezone(dt.timedelta(hours=-4)))
+
+
+class ConsecutiveFailureCounter(unittest.TestCase):
+    """The consecutive_failures counter that drives the escalating backoff:
+    _record_failure increments, _record_success resets, corrupt priors coerce
+    to 0. State I/O is real (temp file), so this locks in the whole cycle."""
+
+    def _isolate_state(self):
+        import tempfile, tick
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        orig = tick.STATE_PATH
+        tick.STATE_PATH = Path(d) / "state.json"
+        self.addCleanup(setattr, tick, "STATE_PATH", orig)
+        return tick
+
+    def test_failure_increments_then_success_resets(self):
+        tick = self._isolate_state()
+        self.assertEqual(tick._consecutive_failures(), 0)        # fresh
+        tick._record_failure(); self.assertEqual(tick._consecutive_failures(), 1)
+        tick._record_failure(); self.assertEqual(tick._consecutive_failures(), 2)
+        tick._record_failure(); self.assertEqual(tick._consecutive_failures(), 3)
+        tick._record_success()
+        self.assertEqual(tick._consecutive_failures(), 0)        # cleared
+        # ...and a failure after a success starts the curve over at 1.
+        tick._record_failure(); self.assertEqual(tick._consecutive_failures(), 1)
+
+    def test_corrupt_counter_coerces_to_zero(self):
+        tick = self._isolate_state()
+        from utils.io import atomic_write_json
+        for bad in ("notanint", -5, None, 2.5):
+            atomic_write_json(tick.STATE_PATH, {"consecutive_failures": bad})
+            self.assertEqual(tick._consecutive_failures(), 0)
+            tick._record_failure()   # corrupt prior -> treated as 0 -> 1
+            self.assertEqual(tick._consecutive_failures(), 1)
 
 
 class _FakePostSession:
@@ -1468,6 +1664,80 @@ class LoadRunLedger(unittest.TestCase):
                 load_run_ledger(self._f(d, '{"runs": "notalist"}'),
                                 log=lambda *_: None),
                 {"schema_version": 1, "runs": []})
+
+    def test_ledger_trimmed_to_cap_on_load(self):
+        # A long-lived 10-min tick would grow the ledger forever; load_run_ledger
+        # bounds it to the most recent LEDGER_MAX_RUNS so the file self-trims on
+        # the next append+write. The KEPT runs must be the newest ones, in order.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            over = LEDGER_MAX_RUNS + 137
+            big = {"schema_version": 1,
+                   "runs": [{"run_id": i} for i in range(over)]}
+            led = load_run_ledger(self._f(d, json.dumps(big)), log=lambda *_: None)
+            self.assertEqual(len(led["runs"]), LEDGER_MAX_RUNS)
+            # newest kept (the last record survives), oldest dropped
+            self.assertEqual(led["runs"][-1]["run_id"], over - 1)
+            self.assertEqual(led["runs"][0]["run_id"], over - LEDGER_MAX_RUNS)
+
+    def test_ledger_at_or_under_cap_is_untouched(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            exact = {"schema_version": 1,
+                     "runs": [{"run_id": i} for i in range(LEDGER_MAX_RUNS)]}
+            self.assertEqual(
+                load_run_ledger(self._f(d, json.dumps(exact)), log=lambda *_: None),
+                exact)
+
+
+class ReengagementSegment(unittest.TestCase):
+    """The --reengagement export: recently-expired residential target permits
+    with a reachable contact, biggest first. Separate from the active funnel."""
+
+    def _db(self):
+        c = sqlite3.connect(":memory:")
+        self.addCleanup(c.close)
+        c.executescript("""
+            CREATE TABLE sca_permits (case_id TEXT PRIMARY KEY, case_number TEXT,
+                case_status TEXT, address_display TEXT, apply_date TEXT,
+                description TEXT);
+            CREATE TABLE sca_leads (case_id TEXT PRIMARY KEY, category TEXT,
+                owner_name TEXT, property_owner_name TEXT, contact_role TEXT,
+                owner_email TEXT, owner_phone TEXT);
+            CREATE TABLE sca_permit_detail (case_id TEXT PRIMARY KEY, valuation REAL);
+        """)
+        # (case_id, status, category, valuation, reachable?) — only the first two
+        # qualify: Expired + target + reachable + >= $50k.
+        recs = [
+            ("keep-big", "Expired", "ADDITION", 500000, "p@x.com", None),   # qualifies
+            ("keep-sm", "Expired", "ADU", 80000, None, "555-1234567"),      # qualifies
+            ("drop-active", "Issued", "NEW_SFR", 900000, "a@x.com", None),  # not Expired
+            ("drop-cat", "Expired", "SUBTRADE", 600000, "b@x.com", None),   # wrong category
+            ("drop-unreach", "Expired", "NEW_SFR", 700000, None, None),     # unreachable
+            ("drop-cheap", "Expired", "REMODEL", 1000, "c@x.com", None),    # under $50k
+            ("drop-old", "Expired", "ADDITION", 300000, "d@x.com", None),   # pre-2023
+        ]
+        for cid, st, cat, val, em, ph in recs:
+            ad = "2019-01-01T00:00:00" if cid == "drop-old" else "2024-06-01T00:00:00"
+            c.execute("INSERT INTO sca_permits VALUES (?,?,?,?,?,?)",
+                      (cid, cid.upper(), st, f"{cid} ST", ad, "scope text"))
+            c.execute("INSERT INTO sca_leads VALUES (?,?,?,?,?,?,?)",
+                      (cid, cat, "Owner Name", "Real Owner", "OWNER", em, ph))
+            c.execute("INSERT INTO sca_permit_detail VALUES (?,?)", (cid, val))
+        c.commit()
+        return c
+
+    def test_only_qualifying_rows_biggest_first(self):
+        rows = _reengagement_rows(self._db())
+        cases = [r[0] for r in rows]   # case_number == case_id.upper()
+        self.assertEqual(cases, ["KEEP-BIG", "KEEP-SM"])  # ordered by valuation DESC
+        # tuple shape matches the CSV column count
+        self.assertEqual(len(rows[0]), len(REENGAGEMENT_COLUMNS))
+
+    def test_prefers_real_property_owner(self):
+        rows = _reengagement_rows(self._db())
+        owner_idx = REENGAGEMENT_COLUMNS.index("owner")
+        self.assertEqual(rows[0][owner_idx], "Real Owner")  # property_owner_name wins
 
 
 class ApplyMigrations(unittest.TestCase):

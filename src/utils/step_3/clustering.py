@@ -12,6 +12,7 @@ anywhere in the project (preferring the anchor's).
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 
@@ -49,13 +50,24 @@ _LONE_STREET_SUFFIX = {"ST", "AVE", "BLVD", "DR", "RD", "LN", "CT", "WAY",
                        "TER", "PL", "CIR", "PKWY", "HWY", "PK"}
 
 
-def cluster_key(main_parcel, address_norm, case_id) -> tuple[str, str]:
+def cluster_key(main_parcel, address_norm, case_id, address_unit=None) -> tuple[str, str]:
     p = (main_parcel or "").strip()
     if p:
         return f"P:{p}", "PARCEL"
     a = (address_norm or "").strip()
     if a and a.upper() not in _LONE_STREET_SUFFIX:
-        return f"A:{a}", "ADDRESS"
+        # Include the unit so a NULL-parcel permit in a multifamily building keys
+        # PER UNIT, not by the bare street address. normalize.split_address()
+        # deliberately holds the unit in a SEPARATE column precisely because
+        # stripping it OVER-COLLAPSES multifamily buildings -- without this, e.g.
+        # 14 distinct units at "1 LAUREL ST" (all parcel-less) merged into one
+        # bogus "project" with mixed owners/contacts (independent review,
+        # 2026-06-02). A unit-less address (the single-family norm) is unchanged.
+        # Normalize the unit (lowercase, drop punctuation/space) so EnerGov's
+        # inconsistent formatting -- "# 106" vs "106" for the SAME unit -- doesn't
+        # over-split it into two clusters.
+        u = re.sub(r"[^a-z0-9]", "", (address_unit or "").lower())
+        return (f"A:{a}|{u}" if u else f"A:{a}"), "ADDRESS"
     return f"C:{case_id}", "SINGLETON"
 
 
@@ -110,6 +122,13 @@ def aggregate(cluster_id: str, key_type: str, members: list[dict]) -> dict:
         # Echo the picked contact's role so the cluster export can show
         # "MILLER JIM (Architect)" the same way the per-permit list does.
         "contact_role": contact.get("contact_role"),
+        # The real property owner's name for the project: prefer the anchor's,
+        # but fall through to ANY member that has one -- an owner named on a
+        # sibling permit (e.g. an older parcel permit) still identifies the
+        # homeowner even when the anchor permit only named a designer.
+        "property_owner_name": (anchor.get("property_owner_name")
+                                or next((m.get("property_owner_name") for m in members
+                                         if m.get("property_owner_name")), None)),
         "has_contractor": 1 if any(m.get("has_contractor") for m in members) else 0,
         "first_apply_date": min(applies) if applies else None,
         "last_apply_date": max(applies) if applies else None,

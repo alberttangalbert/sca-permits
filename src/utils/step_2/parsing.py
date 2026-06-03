@@ -34,6 +34,16 @@ def _s(v):
     return None
 
 
+def _as_list(v):
+    """A source list field, or [] if it's anything else. `(x or [])` only guards
+    None/empty -- a truthy NON-list (e.g. CustomFields returned as a string under
+    EnerGov schema drift or a malformed 200) would iterate by character and then
+    crash on `.get()`, poisoning the whole step2 parse (parse_detail isn't
+    wrapped per-record). Coerce any non-list to [] so a shape change degrades to
+    'no rows' instead of an exception."""
+    return v if isinstance(v, list) else []
+
+
 def _num(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
@@ -99,14 +109,14 @@ def _full_name(first: str | None, last: str | None) -> str | None:
 def _main_parcel(result: dict) -> str | None:
     """Best APN: the Main location address's ParcelNumber, else the first
     non-empty parcel number on any address/parcel."""
-    addresses = result.get("Addresses") or []
+    addresses = _as_list(result.get("Addresses"))
     for a in addresses:
         if a.get("Main") and _s(a.get("ParcelNumber")):
             return _s(a.get("ParcelNumber"))
     for a in addresses:
         if _s(a.get("ParcelNumber")):
             return _s(a.get("ParcelNumber"))
-    for p in (result.get("Parcels") or []):
+    for p in (_as_list(result.get("Parcels"))):
         if _s(p.get("ParcelNumber")):
             return _s(p.get("ParcelNumber"))
     return None
@@ -117,7 +127,7 @@ def _custom_fields(result: dict) -> dict:
     TRAILING SPACES ('Number of Stories ') — strip or every lookup silently misses
     (a bug caught in the step 0-3 audit)."""
     out = {}
-    for cf in (result.get("CustomFields") or []):
+    for cf in (_as_list(result.get("CustomFields"))):
         label = (cf.get("Label") or cf.get("FieldName") or "").strip().lower()
         if label and cf.get("Value") not in (None, ""):
             out[label] = cf.get("Value")
@@ -128,7 +138,7 @@ def _holds_summary(result: dict) -> tuple[int, int]:
     """(active_count, blocking_count). Blocking = active and not an 'Expired
     Permit Hold' (that type just mirrors Expired status, so it's not new signal)."""
     active = blocking = 0
-    for h in (result.get("Holds") or []):
+    for h in (_as_list(result.get("Holds"))):
         if h.get("Active"):
             active += 1
             if "expired permit" not in (h.get("HoldTypeSetupName") or "").lower():
@@ -138,7 +148,7 @@ def _holds_summary(result: dict) -> tuple[int, int]:
 
 def parse_contacts(result: dict, case_id: str) -> list[dict]:
     rows = []
-    for c in (result.get("Contacts") or []):
+    for c in (_as_list(result.get("Contacts"))):
         first, last = _s(c.get("FirstName")), _s(c.get("LastName"))
         role_raw = _s(c.get("ContactTypeName"))
         rows.append({
@@ -169,10 +179,10 @@ def parse_detail(result: dict, case_id: str) -> dict:
         "valuation": _num(result.get("ValuationValue")),
         "square_feet": _num(result.get("SquareFeet")),
         "main_parcel": _main_parcel(result),
-        "parcel_count": len(result.get("Parcels") or []),
-        "contact_count": len(result.get("Contacts") or []),
-        "hold_count": len(result.get("Holds") or []),
-        "attachment_count": len(result.get("Attachments") or []),
+        "parcel_count": len(_as_list(result.get("Parcels"))),
+        "contact_count": len(_as_list(result.get("Contacts"))),
+        "hold_count": len(_as_list(result.get("Holds"))),
+        "attachment_count": len(_as_list(result.get("Attachments"))),
         "permit_type_id": _s(result.get("PermitTypeID")),
         "permit_workclass_id": _s(result.get("PermitWorkClassID")),
         "is_renewal": _bint(result.get("IsRenewal")),

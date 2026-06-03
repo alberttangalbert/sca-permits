@@ -44,9 +44,20 @@ def load_json(path: Path, default):
         return json.load(fh)
 
 
+# Cap on the per-step run ledger. Each step does load -> append -> rewrite the
+# WHOLE file (atomic_write_json), so an unbounded "runs" list turns a cheap audit
+# append into a steadily slower read-modify-write as a long-lived 10-min tick
+# accumulates entries forever. Trimming on LOAD self-bounds the on-disk file to
+# ~this many runs on the next append+write. 500 is months of history at the
+# post-backfill ~4/day cadence (and spans the whole high-frequency backfill
+# phase); dropping older audit rows is strictly fine (same "history is
+# sacrificable" philosophy as the corrupt-ledger reset).
+LEDGER_MAX_RUNS = 500
+
+
 def load_run_ledger(path: Path, log=print) -> dict:
     """Read a step's append-only run ledger ({"schema_version": 1, "runs": [...]}),
-    tolerating damage by starting fresh.
+    tolerating damage by starting fresh and bounding its length.
 
     Every step does `load_json(ledger, default)` then `runs["runs"].append(...)`.
     But load_json only defaults on a MISSING file, so a corrupt/truncated ledger
@@ -55,7 +66,10 @@ def load_run_ledger(path: Path, log=print) -> dict:
     audit log, AFTER its real DB work committed. For the critical step3 that also
     skips the clustering + sync that follow. A damaged audit log must never do
     that: start a fresh ledger (losing history is strictly better than aborting)
-    and warn. Missing file -> fresh, silently (the normal first-run case)."""
+    and warn. Missing file -> fresh, silently (the normal first-run case).
+
+    The returned "runs" is trimmed to the most recent LEDGER_MAX_RUNS so the file
+    self-bounds (it would otherwise grow without limit under a recurring tick)."""
     default = {"schema_version": 1, "runs": []}
     if not path.exists():
         return default
@@ -70,6 +84,8 @@ def load_run_ledger(path: Path, log=print) -> dict:
         log(f"  WARNING: run ledger {path.name} has unexpected shape; "
             f"starting a fresh one")
         return default
+    if len(data["runs"]) > LEDGER_MAX_RUNS:
+        data["runs"] = data["runs"][-LEDGER_MAX_RUNS:]
     return data
 
 

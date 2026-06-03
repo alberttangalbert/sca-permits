@@ -34,7 +34,8 @@ CLUSTER_COLUMNS = [
     "cluster_id", "key_type", "permit_count", "max_lead_score", "top_band",
     "categories", "total_valuation", "max_valuation", "primary_case_id",
     "address_display", "main_parcel", "owner_name", "owner_email", "owner_phone",
-    "contact_role", "has_contractor", "first_apply_date", "last_apply_date",
+    "contact_role", "property_owner_name", "has_contractor",
+    "first_apply_date", "last_apply_date",
 ]
 
 
@@ -83,9 +84,9 @@ def main(args) -> int:
         rows = conn.execute(
             "SELECT l.case_id, l.lead_score, l.lead_band, l.category, l.valuation, "
             "l.owner_name, l.owner_email, l.owner_phone, l.contact_role, "
-            "l.has_contractor, "
+            "l.property_owner_name, l.has_contractor, "
             "p.address_display, COALESCE(d.main_parcel, p.main_parcel) AS main_parcel, "
-            "p.address_norm, p.apply_date "
+            "p.address_norm, p.address_unit, p.apply_date "
             "FROM sca_leads l JOIN sca_permits p USING(case_id) "
             "LEFT JOIN sca_permit_detail d USING(case_id)").fetchall()
 
@@ -94,17 +95,19 @@ def main(args) -> int:
         canonicalized = 0
         for r in rows:
             (case_id, score, band, category, valuation, o_name, o_email, o_phone,
-             contact_role, has_c, addr, parcel, addr_norm, apply_date) = r
+             contact_role, prop_owner, has_c, addr, parcel, addr_norm, addr_unit,
+             apply_date) = r
             if not parcel and addr_norm and addr_norm in canonical_parcel:
                 parcel = canonical_parcel[addr_norm]
                 canonicalized += 1
-            cid, ktype = cluster_key(parcel, addr_norm, case_id)
+            cid, ktype = cluster_key(parcel, addr_norm, case_id, addr_unit)
             key_for_case.append((case_id, cid, ktype))
             clusters[cid].append({
                 "case_id": case_id, "lead_score": score, "lead_band": band,
                 "category": category, "valuation": valuation, "owner_name": o_name,
                 "owner_email": o_email, "owner_phone": o_phone,
-                "contact_role": contact_role, "has_contractor": has_c,
+                "contact_role": contact_role, "property_owner_name": prop_owner,
+                "has_contractor": has_c,
                 "address_display": addr, "main_parcel": parcel, "apply_date": apply_date,
             })
 

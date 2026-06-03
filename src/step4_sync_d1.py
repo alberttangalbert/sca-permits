@@ -75,6 +75,9 @@ LEADS_SPEC = {
         # — the UI shows "MILLER JIM (Architect)" so the GC knows their first
         # call isn't to the homeowner. NULL implies OWNER (pre-migration rows).
         ("contact_role", "TEXT"),
+        # The real property owner's name (may differ from owner_name, which is
+        # the chosen outreach contact). Lets the GC reverse-lookup / mail / knock.
+        ("property_owner_name", "TEXT"),
         ("contractor_name", "TEXT"), ("scored_at", "TEXT"),
         ("cluster_id", "TEXT"), ("cluster_key_type", "TEXT"),
     ],
@@ -84,7 +87,7 @@ SELECT l.case_id, p.case_number, l.lead_score, l.lead_band, l.category,
        l.num_stories, l.construction_type, l.blocking_hold, l.has_contractor,
        p.address_display, p.main_parcel, p.apply_date, p.issue_date,
        p.description, l.owner_name, l.owner_email, l.owner_phone,
-       l.contact_role,
+       l.contact_role, l.property_owner_name,
        l.contractor_name, l.scored_at, l.cluster_id, l.cluster_key_type
 FROM sca_leads l JOIN sca_permits p USING(case_id)
 """,
@@ -98,9 +101,10 @@ FROM sca_leads l JOIN sca_permits p USING(case_id)
     "csv_file": "call_sheet_leads.csv",
     "csv_columns": [
         ("lead_band", "band"), ("lead_score", "score"),
-        ("address_display", "address"), ("owner_name", "owner"),
+        ("address_display", "address"), ("owner_name", "outreach_contact"),
         ("owner_phone", "phone"), ("owner_email", "email"),
-        ("contact_role", "contact"), ("category", "category"),
+        ("contact_role", "contact_role"), ("property_owner_name", "property_owner"),
+        ("category", "category"),
         ("case_status", "status"), ("valuation", "valuation"),
         ("apply_date", "filed"), ("case_number", "case"),
     ],
@@ -119,7 +123,7 @@ CLUSTERS_SPEC = {
         ("primary_case_id", "TEXT"), ("address_display", "TEXT"),
         ("main_parcel", "TEXT"), ("owner_name", "TEXT"),
         ("owner_email", "TEXT"), ("owner_phone", "TEXT"),
-        ("contact_role", "TEXT"),
+        ("contact_role", "TEXT"), ("property_owner_name", "TEXT"),
         ("has_contractor", "INTEGER"), ("first_apply_date", "TEXT"),
         ("last_apply_date", "TEXT"),
     ],
@@ -127,7 +131,7 @@ CLUSTERS_SPEC = {
 SELECT cluster_id, key_type, permit_count, max_lead_score, top_band, categories,
        total_valuation, max_valuation, primary_case_id, address_display,
        main_parcel, owner_name, owner_email, owner_phone, contact_role,
-       has_contractor, first_apply_date, last_apply_date
+       property_owner_name, has_contractor, first_apply_date, last_apply_date
 FROM sca_lead_clusters
 """,
     "band_col": "top_band",
@@ -141,9 +145,10 @@ FROM sca_lead_clusters
     "csv_file": "call_sheet.csv",
     "csv_columns": [
         ("top_band", "band"), ("max_lead_score", "score"),
-        ("address_display", "address"), ("owner_name", "owner"),
+        ("address_display", "address"), ("owner_name", "outreach_contact"),
         ("owner_phone", "phone"), ("owner_email", "email"),
-        ("contact_role", "contact"), ("categories", "categories"),
+        ("contact_role", "contact_role"), ("property_owner_name", "property_owner"),
+        ("categories", "categories"),
         ("permit_count", "permits"), ("last_apply_date", "last_filed"),
         ("main_parcel", "parcel"), ("primary_case_id", "case"),
     ],
@@ -175,6 +180,12 @@ def _lit(v) -> str:
     if isinstance(v, bool):
         return "1" if v else "0"
     if isinstance(v, (int, float)):
+        # NaN/Inf have no SQL literal -- repr() emits the bare tokens nan/inf,
+        # which break (and fail the whole batch) on SQLite/D1. None of the real
+        # numeric columns carry them today (scoring is the de-facto guard), but
+        # null them defensively so a future stray value can't poison the export.
+        if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+            return "NULL"
         return repr(v)
     s = _CTRL_CHARS.sub(" ", str(v).replace("'", "''"))
     return "'" + s + "'"
@@ -239,6 +250,47 @@ def _prune_statement(spec, rows) -> str:
     return f"DELETE FROM {spec['table']} WHERE {pk} NOT IN ({keep});"
 
 
+# --- Re-engagement segment (--reengagement) -------------------------------------
+# A SEPARATE lead motion from the active funnel: residential target permits that
+# were APPROVED/ISSUED then EXPIRED -- the owner proved intent (paid for plans +
+# permitting) but the project stalled. These are correctly DROP-band in the active
+# scoring (Expired -> DEAD), so they never reach the normal call sheet; but a
+# "revive your stalled project" pitch to a proven-intent, reachable owner is a
+# classic GC re-engagement opportunity (audit 2026-06-02: ~75 such permits, 24
+# substantial, 100% reachable). CSV-ONLY: a standalone call list the GC works,
+# never synced to D1 or mixed into the active deliverable. Conservative defaults
+# (recently-expired + substantial + reachable) keep it a curated list, not noise.
+REENGAGEMENT_SINCE_DEFAULT = "2023-01-01"   # only recently expired; older = long dead
+REENGAGEMENT_MIN_VALUATION = 50_000          # focus on substantial stalled projects
+REENGAGEMENT_COLUMNS = ["case", "category", "valuation", "address", "owner",
+                        "contact_role", "phone", "email", "filed", "scope"]
+
+
+def _reengagement_rows(conn, since=REENGAGEMENT_SINCE_DEFAULT,
+                       min_valuation=REENGAGEMENT_MIN_VALUATION):
+    """Recently-expired residential target permits with a reachable contact,
+    biggest first. Returns tuples in REENGAGEMENT_COLUMNS order. NULL valuation
+    is kept (don't drop a real project for a blank field); SQLite sorts NULL last
+    under DESC, so unpriced rows fall to the bottom rather than the top."""
+    return conn.execute(
+        """
+        SELECT p.case_number, l.category, d.valuation, p.address_display,
+               COALESCE(NULLIF(l.property_owner_name, ''), l.owner_name) AS owner,
+               l.contact_role, l.owner_phone, l.owner_email, p.apply_date,
+               substr(p.description, 1, 80) AS scope
+        FROM sca_leads l JOIN sca_permits p USING(case_id)
+        LEFT JOIN sca_permit_detail d USING(case_id)
+        WHERE p.case_status = 'Expired'
+          AND l.category IN ('NEW_SFR', 'ADU', 'ADDITION', 'REMODEL')
+          AND p.apply_date >= ?
+          AND (l.owner_email IS NOT NULL OR l.owner_phone IS NOT NULL)
+          AND (d.valuation IS NULL OR d.valuation >= ?)
+        ORDER BY d.valuation DESC
+        """,
+        (since, min_valuation),
+    ).fetchall()
+
+
 def _execute_remote(statements, log=print) -> int:
     """POST each statement batch to the D1 HTTP API using env credentials."""
     import requests
@@ -265,6 +317,26 @@ def _execute_remote(statements, log=print) -> int:
 
 def main(args) -> int:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Re-engagement segment: a CSV-only side deliverable, fully independent of the
+    # active funnel / D1 sync. Generate it and return -- never touches sca_leads
+    # export or D1.
+    if getattr(args, "reengagement", False):
+        conn = connect()
+        try:
+            rows = _reengagement_rows(conn)
+        finally:
+            conn.close()
+        csv_rows = [dict(zip(REENGAGEMENT_COLUMNS, r)) for r in rows]
+        csv_path = OUTPUTS_DIR / "call_sheet_reengagement.csv"
+        atomic_write_csv(csv_path, csv_rows, REENGAGEMENT_COLUMNS)
+        print(f"[step4] reengagement: wrote {csv_path.relative_to(ROOT)} "
+              f"({len(csv_rows)} recently-expired residential leads, "
+              f"reachable, >= ${REENGAGEMENT_MIN_VALUATION:,}). "
+              f"A 'revive your stalled project' call list, separate from the "
+              f"active funnel.")
+        return 0
+
     spec = CLUSTERS_SPEC if args.clusters else LEADS_SPEC
     bands = None if args.all else (
         [b.strip().upper() for b in args.band.split(",")] if args.band
@@ -346,4 +418,9 @@ if __name__ == "__main__":
                         "or call_sheet_leads.csv. Open in Excel and start calling.")
     p.add_argument("--execute", action="store_true",
                    help="POST to the D1 HTTP API using CF_* env vars (opt-in).")
+    p.add_argument("--reengagement", action="store_true",
+                   help="Instead of the active funnel, write a SEPARATE call sheet "
+                        "of recently-expired residential leads (a 'revive your "
+                        "stalled project' segment) -> outputs/step_4/"
+                        "call_sheet_reengagement.csv. CSV-only, never synced to D1.")
     raise SystemExit(main(p.parse_args()))

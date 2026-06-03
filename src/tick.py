@@ -155,6 +155,28 @@ def _release_lock() -> None:
 # self-heals on the next scheduled fire.
 OUTAGE_BACKOFF_MINUTES = 30
 
+# The portal's 403 is an IP-level block under cumulative load, not a transient
+# blip -- it can persist for HOURS. A flat 30-min backoff would re-poke a still-
+# blocking portal ~every 30 min, burning retry wall-clock AND adding load that
+# may *prolong* the block. So the backoff ESCALATES with consecutive failures
+# (30m -> 1h -> 2h -> 4h cap): each new failure doubles the wait, and the first
+# success resets the counter. This backs off harder the longer the outage lasts,
+# matching the documented "403 is a block, not a retry" reality.
+MAX_OUTAGE_BACKOFF_MINUTES = 240  # 4h cap
+
+
+def escalated_backoff_minutes(
+        consecutive_failures: int,
+        base: float = OUTAGE_BACKOFF_MINUTES,
+        cap: float = MAX_OUTAGE_BACKOFF_MINUTES) -> float:
+    """Effective outage-backoff window given the number of consecutive failed
+    refreshes. Pure (no I/O) so the escalation curve is unit-tested.
+
+    n<=1 -> base (30m); each further consecutive failure doubles the wait,
+    capped: n=2 -> 60m, n=3 -> 120m, n=4 -> 240m, n>=5 -> 240m (cap)."""
+    exponent = max(0, consecutive_failures - 1)
+    return min(base * (2 ** exponent), cap)
+
 
 def _read_state() -> dict:
     try:
@@ -177,6 +199,14 @@ def _last_failure() -> dt.datetime | None:
         return None
 
 
+def _consecutive_failures() -> int:
+    """How many refreshes have failed in a row (0 if none / unknown). Drives the
+    escalating outage backoff. A pre-escalation state file (no counter) reads as
+    0, so the first failure under the new code starts the curve at base."""
+    v = _read_state().get("consecutive_failures", 0)
+    return v if isinstance(v, int) and v > 0 else 0
+
+
 def _record_success() -> None:
     # Atomic write: a kill mid-write would otherwise leave STATE_PATH as a
     # partial JSON blob. _last_success() catches that as ValueError and returns
@@ -187,6 +217,7 @@ def _record_success() -> None:
     state = _read_state()
     state["last_success_at"] = now.isoformat()
     state.pop("last_failure_at", None)
+    state.pop("consecutive_failures", None)  # a recovered portal resets the curve
     atomic_write_json(STATE_PATH, state)
 
 
@@ -194,6 +225,9 @@ def _record_failure() -> None:
     now = dt.datetime.now().astimezone().replace(microsecond=0)
     state = _read_state()
     state["last_failure_at"] = now.isoformat()
+    prior = state.get("consecutive_failures", 0)
+    state["consecutive_failures"] = (prior if isinstance(prior, int) and prior > 0
+                                     else 0) + 1
     atomic_write_json(STATE_PATH, state)
 
 
@@ -311,11 +345,16 @@ def main(args) -> int:
     age_h = (now - last).total_seconds() / 3600 if last else None
     failure_age_min = ((now - last_failure).total_seconds() / 60
                        if last_failure else None)
+    # Backoff window escalates with the run of consecutive failures: a sustained
+    # portal block (the 403 can last hours) is re-poked far less often than a
+    # one-off blip. base 30m -> 1h -> 2h -> 4h cap; reset on the next success.
+    n_fail = _consecutive_failures()
+    eff_backoff_min = escalated_backoff_minutes(n_fail)
     do_refresh = should_refresh(args.force, last, now, args.min_interval_hours,
-                                last_failure)
+                                last_failure, eff_backoff_min)
     in_outage_backoff = (not args.force and last_failure is not None
                          and failure_age_min is not None
-                         and failure_age_min < OUTAGE_BACKOFF_MINUTES)
+                         and failure_age_min < eff_backoff_min)
 
     if args.dry_run:
         print("\n[tick] DRY RUN — plan only, nothing fetched/cleared/written:")
@@ -351,7 +390,8 @@ def main(args) -> int:
     if should_skip_entirely(do_refresh, args.backfill_chunk, missing):
         if in_outage_backoff:
             print(f"[tick] refresh in outage backoff (last failure {failure_age_min:.1f}min "
-                  f"ago < {OUTAGE_BACKOFF_MINUTES}min) and backfill complete "
+                  f"ago < {eff_backoff_min:.0f}min, {n_fail} consecutive "
+                  f"failures) and backfill complete "
                   f"(missing detail: {missing}); nothing to do.")
         else:
             print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h) "
@@ -360,7 +400,8 @@ def main(args) -> int:
     if not do_refresh:
         if in_outage_backoff:
             print(f"[tick] refresh in outage backoff (last failure {failure_age_min:.1f}min "
-                  f"ago < {OUTAGE_BACKOFF_MINUTES}min); backfill-only pass — "
+                  f"ago < {eff_backoff_min:.0f}min, {n_fail} consecutive "
+                  f"failures); backfill-only pass — "
                   f"{missing} records still lack detail.")
         else:
             print(f"[tick] refresh throttled ({age_h:.1f}h < {args.min_interval_hours}h); "

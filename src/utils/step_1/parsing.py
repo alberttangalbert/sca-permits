@@ -69,7 +69,12 @@ def parse_page(result: dict, module_label: str, source_page: int) -> list[dict]:
     """Map a cached page's Result envelope to a list of sca_permits row dicts,
     skipping any entity missing a CaseId (the primary key)."""
     rows = []
-    for entity in (result.get("EntityResults") or []):
+    # EntityResults must be a LIST. `(x or [])` only guards None/empty -- a truthy
+    # non-list (schema drift / malformed 200) would iterate by character and crash
+    # map_entity's .get(), aborting the critical parse step. Coerce to [] so a
+    # shape change degrades to 'no rows' rather than poisoning the whole page.
+    entities = result.get("EntityResults")
+    for entity in (entities if isinstance(entities, list) else []):
         row = map_entity(entity, module_label, source_page)
         if row["case_id"]:
             rows.append(row)

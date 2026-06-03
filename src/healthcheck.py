@@ -106,6 +106,28 @@ COUNT_CHECKS = [
      "AND ((owner_email IS NOT NULL AND owner_email != '') "
      "  OR (owner_phone IS NOT NULL AND owner_phone != '') "
      "  OR (owner_name IS NOT NULL AND owner_name != ''))"),
+    # Placeholder identities must NEVER surface as a lead contact. scoring's
+    # _is_placeholder drops EnerGov-conversion stamps ("EnerGov 2023Q4" /
+    # energovconversion@tylertech.com, ~2,400 rows) and 'void void'/'builder
+    # owner' markers before pick_contacts ranks anyone. That filter is the only
+    # thing standing between the GC and a call sheet full of Tyler migration
+    # noise -- but nothing RE-ASSERTS it on the output, so a refactor that broke
+    # the filter (or the new property_owner_name path, which also carries an
+    # owner name) would leak junk with no other alarm. FAIL: a regression here
+    # silently poisons the deliverable. Keep the markers in sync with
+    # scoring._PLACEHOLDER_NAMES / _ENERGOV_MIGRATION_NAME.
+    ("FAIL", "leads: no placeholder identity surfaced as a contact",
+     "SELECT COUNT(*) FROM sca_leads WHERE "
+     "owner_email LIKE '%@tylertech.com%' "
+     "OR owner_name LIKE 'EnerGov ____Q_' OR property_owner_name LIKE 'EnerGov ____Q_' "
+     "OR LOWER(owner_name) IN ('void void','builder owner','test test','redacted redacted') "
+     "OR LOWER(property_owner_name) IN ('void void','builder owner','test test','redacted redacted')"),
+    ("FAIL", "clusters: no placeholder identity surfaced as a contact",
+     "SELECT COUNT(*) FROM sca_lead_clusters WHERE "
+     "owner_email LIKE '%@tylertech.com%' "
+     "OR owner_name LIKE 'EnerGov ____Q_' OR property_owner_name LIKE 'EnerGov ____Q_' "
+     "OR LOWER(owner_name) IN ('void void','builder owner','test test','redacted redacted') "
+     "OR LOWER(property_owner_name) IN ('void void','builder owner','test test','redacted redacted')"),
     # cluster_id format must agree with cluster_key_type: PARCEL -> "P:<...>",
     # ADDRESS -> "A:<...>", SINGLETON -> "C:<...>" (the prefixes are how the
     # D1 prune step distinguishes them and how the cluster spec maps to the
