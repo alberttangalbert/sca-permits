@@ -10,6 +10,26 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p logs
 
+# --- Single-instance lock (portable; macOS has no flock) ---
+# A real 6h re-pull runs for minutes (step0 + step0b + detail backfill); the
+# 5 throttled no-op fires in between are instant. Without a lock, a real pull
+# that overruns into the next hourly :50 fire — before its throttle timestamp
+# is recorded — would start a CONCURRENT tick: 2x load on the rate-limited
+# Tyler EnerGov host plus racing writes to sca_permits.db. mkdir is atomic, so
+# only one tick holds the lock; a tick whose holder PID is dead reclaims a
+# stale lock. Matches the sibling scl-/fre-permits locks.
+LOCK_DIR=".tick.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  if [ -f "$LOCK_DIR/pid" ] && kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null)" 2>/dev/null; then
+    echo "[$(date '+%H:%M:%S')] another tick is running (pid $(cat "$LOCK_DIR/pid")); skipping."
+    exit 0
+  fi
+  echo "[$(date '+%H:%M:%S')] reclaiming stale tick lock"
+  rm -rf "$LOCK_DIR"; mkdir "$LOCK_DIR"
+fi
+echo $$ > "$LOCK_DIR/pid"
+trap 'rm -rf "$LOCK_DIR"' EXIT
+
 # Activate the project venv if present (cron has a bare environment).
 if [ -f venv/bin/activate ]; then
   # shellcheck disable=SC1091

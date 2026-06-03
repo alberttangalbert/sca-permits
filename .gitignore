@@ -22,6 +22,9 @@ outputs/
 # Cron / debug logs
 logs/
 
+# Single-instance tick lock (transient; created on tick start, removed on exit)
+.tick.lock/
+
 # Backups
 backups/
 
