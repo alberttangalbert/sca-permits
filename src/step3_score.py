@@ -40,6 +40,7 @@ LEAD_COLUMNS = [
     "owner_name", "owner_email", "owner_phone", "contact_role",
     "property_owner_name", "contractor_name",
     "additional_sqft", "num_stories", "construction_type", "blocking_hold",
+    "score_breakdown",
 ]
 
 

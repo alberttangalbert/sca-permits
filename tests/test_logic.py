@@ -517,6 +517,49 @@ class ScoreRecord(unittest.TestCase):
         self.assertEqual(stale["lead_band"], "LOW")   # out of HIGH/MEDIUM
 
 
+class ScoreBreakdownJSON(unittest.TestCase):
+    """score_breakdown JSON powers the frontend "Why this lead" panel. Lock in
+    the contract so a scoring change can't silently break it: valid JSON, the
+    ScoreBreakdown shape, factor ids the frontend FACTOR_META knows, factors that
+    multiply to the score, and a strength matching the band. (Mirrors
+    dan-permits' ScoreBreakdownJSON — shared EnerGov scorer.)"""
+
+    # Must stay in lockstep with web/src/lib/api/types.ts FactorId.
+    _FRONTEND_FACTOR_IDS = {"warmth", "type_fit", "recency", "size",
+                            "status", "contractor", "hold"}
+
+    def _bd(self, **over):
+        base = dict(case_type="Building Residential-New Single Family",
+                    case_status="Approved", description="New SFR", valuation=600000,
+                    contacts=[{"role": "OWNER", "full_name": "O", "email": "o@x",
+                               "phone": "6505551234"}])
+        lead = score_record(**{**base, **over})
+        return lead, json.loads(lead["score_breakdown"])
+
+    def test_shape_and_keys(self):
+        _, bd = self._bd()
+        self.assertEqual(set(bd), {"formula", "lead_score", "strength",
+                                   "factors", "gates", "flags"})
+        self.assertEqual(len(bd["factors"]), 6)
+
+    def test_factor_ids_known_to_frontend(self):
+        _, bd = self._bd()
+        for f in bd["factors"]:
+            self.assertIn(f["factor"], self._FRONTEND_FACTOR_IDS)
+
+    def test_factors_multiply_to_score(self):
+        lead, bd = self._bd()
+        prod = 1.0
+        for f in bd["factors"]:
+            prod *= f["effective_value"]
+        self.assertAlmostEqual(prod, lead["lead_score"], places=3)
+
+    def test_strength_matches_band(self):
+        lead, bd = self._bd()
+        if lead["lead_band"] in ("HIGH", "MEDIUM", "LOW"):
+            self.assertEqual(bd["strength"], lead["lead_band"])
+
+
 class Recency(unittest.TestCase):
     def test_buckets_by_age(self):
         today = dt.date(2026, 5, 29)
@@ -974,7 +1017,8 @@ class ExportSinceFloor(unittest.TestCase):
                 blocking_hold INTEGER, has_contractor INTEGER, owner_name TEXT,
                 owner_email TEXT, owner_phone TEXT, contact_role TEXT,
                 property_owner_name TEXT, contractor_name TEXT,
-                scored_at TEXT, cluster_id TEXT, cluster_key_type TEXT);
+                scored_at TEXT, cluster_id TEXT, cluster_key_type TEXT,
+                score_breakdown TEXT);
             CREATE TABLE sca_lead_clusters (cluster_id TEXT PRIMARY KEY,
                 key_type TEXT, permit_count INTEGER, max_lead_score REAL,
                 top_band TEXT, categories TEXT, total_valuation REAL,

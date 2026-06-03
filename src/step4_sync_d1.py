@@ -80,6 +80,10 @@ LEADS_SPEC = {
         ("property_owner_name", "TEXT"),
         ("contractor_name", "TEXT"), ("scored_at", "TEXT"),
         ("cluster_id", "TEXT"), ("cluster_key_type", "TEXT"),
+        # Fremont-shape factor decomposition JSON (type_fit/size/status/
+        # contractor/hold/recency) for the frontend "Why this lead" panel.
+        # Built in scoring.build_score_breakdown; surfaced by sancarlos.ts.
+        ("score_breakdown", "TEXT"),
     ],
     "select": """
 SELECT l.case_id, p.case_number, l.lead_score, l.lead_band, l.category,
@@ -88,7 +92,8 @@ SELECT l.case_id, p.case_number, l.lead_score, l.lead_band, l.category,
        p.address_display, p.main_parcel, p.apply_date, p.issue_date,
        p.description, l.owner_name, l.owner_email, l.owner_phone,
        l.contact_role, l.property_owner_name,
-       l.contractor_name, l.scored_at, l.cluster_id, l.cluster_key_type
+       l.contractor_name, l.scored_at, l.cluster_id, l.cluster_key_type,
+       l.score_breakdown
 FROM sca_leads l JOIN sca_permits p USING(case_id)
 """,
     "band_col": "l.lead_band",

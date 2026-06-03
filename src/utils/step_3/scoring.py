@@ -373,6 +373,75 @@ def pick_contacts(contacts: list[dict]) -> dict:
     }
 
 
+# Bands → display strength. DROP leads aren't synced to D1, but clamp anyway so
+# the breakdown's `strength` always satisfies the frontend's HIGH|MEDIUM|LOW type.
+_STRENGTH = {"HIGH": "HIGH", "MEDIUM": "MEDIUM", "LOW": "LOW"}
+
+
+def build_score_breakdown(*, score, band_name, type_fit, size_factor,
+                          status_factor, contractor_factor, hold_factor,
+                          recency_factor, status_bucket, valuation,
+                          has_contractor, blocking, days_old):
+    """Fremont-shape score_breakdown JSON for the frontend "Why this lead" panel.
+
+    San Carlos (like Danville) scores on the 6-factor EnerGov model
+    (type_fit·size·status·contractor·hold·recency), so we emit all six — the
+    frontend FACTOR_META carries the `status`/`contractor`/`hold` ids the EnerGov
+    cities add on top of fr/sj's 4-factor model. effective_value==value here (no
+    COALESCE fallbacks — every factor is concrete). gates[] is empty: the model
+    is pure-multiplicative with no hard 0.0 gate (a dead status simply drives
+    status_factor→0), so the workability checklist self-hides. (Ported verbatim
+    from dan-permits — the two EnerGov cities share this scorer shape.)
+    """
+    val_label = (f"${round(valuation):,} valuation" if valuation and valuation > 0
+                 else "Valuation unknown")
+    age_label = (f"{days_old} day{'' if days_old == 1 else 's'} old"
+                 if days_old is not None else "Age unknown")
+
+    def factor(fid, value, label, explain):
+        return {"factor": fid, "value": round(value, 4),
+                "effective_value": round(value, 4), "label": label,
+                "explain": explain}
+
+    factors = [
+        factor("type_fit", type_fit, "Project type",
+               "How well the permit's work type matches residential-GC scope "
+               "(new SFR / ADU / addition / remodel score highest)."),
+        factor("size", size_factor, val_label,
+               "Project size from the EnerGov valuation; bigger jobs score higher "
+               "(missing valuation falls back to a neutral mid value)."),
+        factor("status", status_factor, status_bucket or "Unknown",
+               "Where the permit sits in the city's workflow — near-issuance / "
+               "ready-to-issue is the GC sweet spot; dead/complete scores ~0."),
+        factor("contractor", contractor_factor,
+               "Contractor attached" if has_contractor else "No contractor yet",
+               "A permit with a contractor already attached is de-prioritized "
+               "(the GC role is likely filled); no contractor keeps full weight."),
+        factor("hold", hold_factor,
+               "Blocking hold" if blocking else "No blocking hold",
+               "An active blocking hold means the project is stuck at the city, "
+               "so it's lightly de-prioritized."),
+        factor("recency", recency_factor, age_label,
+               "Lead value decays with permit age."),
+    ]
+    return {
+        "formula": "lead_score = type_fit * size * status * contractor * hold * recency",
+        "lead_score": score,
+        "strength": _STRENGTH.get(band_name, "LOW"),
+        "factors": factors,
+        "gates": [],
+        "flags": {
+            "lead_surface": "",
+            "warmth_tier": "",
+            "is_self_filer": False,
+            "is_near_issuance": status_bucket == "READY_TO_ISSUE",
+            "contractor_dispute": False,
+            "is_sibling_folder": False,
+            "is_primary_in_cluster": True,
+        },
+    }
+
+
 def score_record(case_type, case_status, description, valuation, contacts, *,
                  additional_sqft=None, num_stories=None, construction_type=None,
                  blocking_hold_count=0, apply_date=None, today=None) -> dict:
@@ -411,14 +480,31 @@ def score_record(case_type, case_status, description, valuation, contacts, *,
     # already treats <=0 as neutral; null the field on the lead row too so D1
     # and downstream readers don't see misleading negative dollar amounts.
     clean_valuation = valuation if (valuation and valuation > 0) else None
+    band_name = band(score)
+    # Days since application — for the recency factor's display label only (the
+    # score itself uses recency_factor's year-bucketed decay).
+    days_old = None
+    if apply_date:
+        try:
+            applied = dt.date.fromisoformat(apply_date[:10])
+            days_old = ((today or dt.date.today()) - applied).days
+        except (ValueError, TypeError):
+            days_old = None
+    breakdown = build_score_breakdown(
+        score=score, band_name=band_name, type_fit=type_fit, size_factor=sf,
+        status_factor=stf, contractor_factor=contractor_factor,
+        hold_factor=hold_factor, recency_factor=rf, status_bucket=bucket,
+        valuation=clean_valuation, has_contractor=picked["has_contractor"],
+        blocking=blocking, days_old=days_old)
     return {
         "lead_score": score,
-        "lead_band": band(score),
+        "lead_band": band_name,
         "category": category,
         "type_fit": type_fit,
         "size_factor": sf,
         "status_factor": stf,
         "contractor_factor": contractor_factor,
+        "hold_factor": hold_factor,
         "recency_factor": rf,
         "status_bucket": bucket,
         "valuation": clean_valuation,
@@ -426,5 +512,6 @@ def score_record(case_type, case_status, description, valuation, contacts, *,
         "num_stories": num_stories,
         "construction_type": construction_type,
         "blocking_hold": blocking,
+        "score_breakdown": json.dumps(breakdown, separators=(",", ":")),
         **picked,
     }
