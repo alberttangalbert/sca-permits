@@ -53,6 +53,15 @@ from utils.io import ROOT, atomic_write_csv, connect
 OUTPUTS_DIR = ROOT / "outputs" / "step_4"
 CHUNK = 100  # rows per multi-row INSERT (and per HTTP request batch)
 
+# D1 rejects any single SQL statement over ~100KB. CHUNK=100 lead rows normally
+# land well under that, but adding the score_breakdown JSON (factor decomposition
+# for the "Why this lead" panel) pushed some 100-row chunks past the ceiling
+# (SQLITE_TOOBIG on --execute; a SILENTLY-partial mirror on the wrangler --file
+# path). So we keep each emitted INSERT under this byte ceiling by splitting any
+# chunk that would exceed it (ported from dan-permits). 90KB leaves headroom
+# under D1's ~100KB for the multi-statement wrapping.
+MAX_STATEMENT_BYTES = 90_000
+
 # Each export target: the D1 table, its columns (first column is the PK / upsert
 # conflict target), the SELECT that fills it IN THE SAME COLUMN ORDER, the band
 # column used for --band filtering, sort, and the indexes to create.
@@ -219,12 +228,32 @@ def _insert_statements(spec, rows) -> list[str]:
     pk = cols[0]
     cols_sql = ", ".join(cols)
     updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != pk)
-    stmts = []
-    for i in range(0, len(rows), CHUNK):
+    prefix = f"INSERT INTO {spec['table']} ({cols_sql}) VALUES\n  "
+    suffix = f"\nON CONFLICT({pk}) DO UPDATE SET {updates};"
+
+    def build(batch) -> str:
         values = ",\n  ".join("(" + ", ".join(_lit(v) for v in r) + ")"
-                              for r in rows[i:i + CHUNK])
-        stmts.append(f"INSERT INTO {spec['table']} ({cols_sql}) VALUES\n  {values}\n"
-                     f"ON CONFLICT({pk}) DO UPDATE SET {updates};")
+                              for r in batch)
+        return prefix + values + suffix
+
+    def emit(batch, out):
+        # Keep each statement under MAX_STATEMENT_BYTES: a batch that would exceed
+        # it is split in half and retried, down to a single row (one row over the
+        # ceiling is unsplittable -> emit it and let _execute_remote surface the
+        # D1 rejection rather than truncating silently here).
+        if not batch:
+            return
+        stmt = build(batch)
+        if len(stmt.encode("utf-8")) <= MAX_STATEMENT_BYTES or len(batch) == 1:
+            out.append(stmt)
+            return
+        mid = len(batch) // 2
+        emit(batch[:mid], out)
+        emit(batch[mid:], out)
+
+    stmts: list[str] = []
+    for i in range(0, len(rows), CHUNK):
+        emit(rows[i:i + CHUNK], stmts)
     return stmts
 
 
