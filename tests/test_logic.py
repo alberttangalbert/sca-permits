@@ -259,7 +259,7 @@ class Contacts(unittest.TestCase):
              "phone": None},
             {"role": "APPLICANT", "full_name": "Reachable App", "email": None,
              "phone": "555-1234567"}])
-        self.assertEqual(picked["owner_phone"], "555-1234567")
+        self.assertEqual(picked["owner_phone"], "5551234567")
         self.assertEqual(picked["owner_name"], "Reachable App")
         # ...but the real homeowner's NAME must NOT be lost: it rides along on
         # property_owner_name so the GC can still reverse-lookup / mail / knock.
@@ -397,18 +397,31 @@ class Contacts(unittest.TestCase):
              "email": None, "phone": "555-1234567"}])
         self.assertEqual(picked["contact_role"], "DESIGNER")
         self.assertIsNone(picked["owner_email"])
-        self.assertEqual(picked["owner_phone"], "555-1234567")
+        self.assertEqual(picked["owner_phone"], "5551234567")
 
-    def test_short_phone_is_dropped(self):
-        # 7-digit "phones" (missing area code) and shorter junk are not
-        # reachable for systematic outreach -- treat them as missing.
+    def test_too_short_phone_is_dropped(self):
+        # Genuinely-short junk (<7 digits) can't be recovered to a real number,
+        # so it's treated as missing and the lead falls through to a reachable
+        # contact. (7-digit numbers ARE recovered -- see the next test.)
+        picked = pick_contacts([
+            {"role": "OWNER", "full_name": "Local-only", "email": None,
+             "phone": "555-12"},
+            {"role": "APPLICANT", "full_name": "Reachable",
+             "email": "a@b.com", "phone": "(650) 555-1234"}])
+        self.assertEqual(picked["contact_role"], "APPLICANT")
+        self.assertEqual(picked["owner_email"], "a@b.com")
+
+    def test_seven_digit_phone_is_recovered(self):
+        # San Carlos is wholly area code 650, so a 7-digit owner phone (area
+        # code stripped by the legacy EnerGov import) is recovered by prepending
+        # 650 rather than dropped -- the owner stays reachable and is picked.
         picked = pick_contacts([
             {"role": "OWNER", "full_name": "Local-only", "email": None,
              "phone": "555-1234"},
             {"role": "APPLICANT", "full_name": "Reachable",
              "email": "a@b.com", "phone": "(650) 555-1234"}])
-        self.assertEqual(picked["contact_role"], "APPLICANT")
-        self.assertEqual(picked["owner_email"], "a@b.com")
+        self.assertEqual(picked["contact_role"], "OWNER")
+        self.assertEqual(picked["owner_phone"], "6505551234")
 
     def test_phone_in_email_field_doesnt_count_as_email(self):
         # EnerGov sometimes has '5302210761' in the email field (data entry
